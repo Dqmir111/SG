@@ -6,6 +6,36 @@
     <title>SecretGram Messenger</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    
+    <!-- НОВЫЙ БЛОК: Правила безопасности Firebase Firestore -->
+    <script type="text/security-rules">
+    rules_version = '2';
+    service cloud.firestore {
+      match /databases/{database}/documents {
+    
+        // Вспомогательная функция для проверки аутентификации
+        function isAuthenticated() {
+          return request.auth != null;
+        }
+
+        // --- 1. ПРИВАТНЫЕ ДАННЫЕ (Профиль пользователя) ---
+        // Путь: /artifacts/{appId}/users/{userId}/profiles/{document}
+        // Разрешить чтение/запись только владельцу профиля
+        match /artifacts/{appId}/users/{userId}/profiles/{document=**} {
+          allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        }
+
+        // --- 2. ПУБЛИЧНЫЕ ДАННЫЕ (Чат и Список пользователей) ---
+        // Путь: /artifacts/{appId}/public/data/{path}
+        // Разрешить чтение/запись любому аутентифицированному пользователю (включая анонимных)
+        match /artifacts/{appId}/public/data/{path=**} {
+          allow read, write: if isAuthenticated();
+        }
+      }
+    }
+    </script>
+    <!-- КОНЕЦ НОВОГО БЛОКА -->
+    
     <style>
         /* Глобальные стили */
         body {
@@ -229,8 +259,11 @@
         let allUsers = []; 
 
         // --- Пути Firestore ---
+        // ПРИВАТНЫЙ: Профиль пользователя
         const PROFILE_DOC_PATH = (uid) => `artifacts/${appId}/users/${uid}/profiles/myProfile`;
+        // ПУБЛИЧНЫЙ: Сообщения в общем чате
         const CHAT_COLLECTION_PATH = (id) => `artifacts/${appId}/public/data/chats/${id}/messages`;
+        // ПУБЛИЧНЫЙ: Список всех пользователей (для поиска и транзакций никнейма)
         const ALL_USERS_COLLECTION_PATH = `artifacts/${appId}/public/data/users`;
 
         // Элементы UI
@@ -315,7 +348,6 @@
                     try {
                         await signInAnonymously(auth);
                         // Если анонимный вход успешен, onAuthStateChanged обработает переход на следующий экран.
-                        // Возвращаемся, чтобы избежать finally, так как переход на другой экран уже начат.
                         return; 
                     } catch (e) {
                         errorMessage += " Ошибка анонимного входа: " + e.message;
@@ -387,6 +419,7 @@
                         await signOut(auth);
                     }
                 } catch(e) {
+                    // Если initial auth fails, это нормально, перейдем на auth screen
                     console.warn("Initial authentication failed, proceeding to auth screen:", e);
                 }
                 // --- КОНЕЦ Обязательный шаг ---
@@ -397,15 +430,25 @@
                         userId = user.uid;
                         await ensureUserProfile(userId);
                         renderApp('messenger');
-                        setupUserAndChatListeners(); 
-                        openChat(PUBLIC_CHAT_ID, 'public', 'Общий чат');
+                        // Проверка isAuthReady, прежде чем настраивать слушатели
+                        if (isAuthReady) {
+                            setupUserAndChatListeners(); 
+                            openChat(PUBLIC_CHAT_ID, 'public', 'Общий чат');
+                        }
                     } else {
                         userId = null;
                         // Если нет пользователя, показываем экран аутентификации
                         renderApp('auth');
                         if (unsubscribeChat) unsubscribeChat(); // Отписываемся от чата
                     }
-                    isAuthReady = true;
+                    // Устанавливаем isAuthReady в true после первого onAuthStateChanged
+                    if (!isAuthReady) {
+                        isAuthReady = true;
+                        if (auth.currentUser) {
+                             setupUserAndChatListeners(); 
+                             openChat(PUBLIC_CHAT_ID, 'public', 'Общий чат');
+                        }
+                    }
                     loadingScreen.classList.add('hidden');
                 });
 
@@ -441,7 +484,7 @@
                     userNickname = defaultNickname; 
                     userProfile = { uid: uid, nickname: defaultNickname, createdAt: serverTimestamp(), email: auth.currentUser.email || 'N/A' };
                     await setDoc(profileRef, userProfile);
-                    await updateNickname(defaultNickname); // Регистрация в публичной коллекции
+                    await updateNickname(defaultNickname, true); // Регистрация в публичной коллекции
                 }
                 localStorage.setItem('userNickname', userNickname);
                 updateUIForUser();
@@ -453,7 +496,7 @@
         /**
          * Обновляет публичный никнейм и проверяет его уникальность с помощью транзакции.
          */
-        async function updateNickname(newNickname) {
+        async function updateNickname(newNickname, isInitialCreation = false) {
             newNickname = newNickname.trim();
             if (!newNickname || newNickname.length < 3) {
                  profileError.textContent = 'Никнейм должен содержать не менее 3 символов.';
@@ -462,26 +505,33 @@
             }
             
             const profileRef = doc(db, PROFILE_DOC_PATH(userId));
+            // Использование toLowerCase() для никнейма в качестве ID публичного документа
             const userPublicRef = doc(db, ALL_USERS_COLLECTION_PATH, newNickname.toLowerCase());
 
-            profileError.textContent = 'Проверка уникальности...';
-            profileError.classList.remove('text-red-400', 'text-green-400');
-            profileError.classList.add('text-yellow-400');
+            if (!isInitialCreation) {
+                profileError.textContent = 'Проверка уникальности...';
+                profileError.classList.remove('text-red-400', 'text-green-400');
+                profileError.classList.add('text-yellow-400');
+            }
             
             try {
                 await runTransaction(db, async (transaction) => {
                     const publicSnap = await transaction.get(userPublicRef);
+                    
+                    // Проверка, занят ли никнейм другим пользователем
                     if (publicSnap.exists() && publicSnap.data().uid !== userId) {
                         throw new Error(`Никнейм "${newNickname}" уже занят.`);
                     }
 
-                    if (userProfile.nickname && userProfile.nickname !== newNickname) {
+                    // Если это не первоначальное создание и никнейм изменился, удаляем старую публичную запись
+                    if (!isInitialCreation && userProfile.nickname && userProfile.nickname !== newNickname) {
                         const oldUserPublicRef = doc(db, ALL_USERS_COLLECTION_PATH, userProfile.nickname.toLowerCase());
                         transaction.delete(oldUserPublicRef);
                     }
 
                     userProfile.nickname = newNickname;
                     
+                    // Обновляем приватный профиль и публичную запись
                     transaction.set(profileRef, userProfile, { merge: true }); 
                     transaction.set(userPublicRef, { uid: userId, nickname: newNickname, lastUpdated: serverTimestamp() }); 
                 });
@@ -489,15 +539,20 @@
                 userNickname = newNickname;
                 localStorage.setItem('userNickname', userNickname);
                 updateUIForUser();
-                profileError.textContent = 'Никнейм успешно обновлен!';
-                profileError.classList.remove('text-yellow-400');
-                profileError.classList.add('text-green-400');
+                
+                if (!isInitialCreation) {
+                    profileError.textContent = 'Никнейм успешно обновлен!';
+                    profileError.classList.remove('text-yellow-400');
+                    profileError.classList.add('text-green-400');
+                }
                 return true;
 
             } catch (e) {
-                profileError.textContent = `Ошибка: ${e.message}`;
-                profileError.classList.remove('text-yellow-400');
-                profileError.classList.add('text-red-400');
+                if (!isInitialCreation) {
+                    profileError.textContent = `Ошибка: ${e.message}`;
+                    profileError.classList.remove('text-yellow-400');
+                    profileError.classList.add('text-red-400');
+                }
                 console.error("Ошибка транзакции обновления никнейма:", e);
                 return false;
             }
@@ -510,11 +565,17 @@
          * Устанавливает слушатели для всех публичных пользователей и текущего чата.
          */
         function setupUserAndChatListeners() {
+            // Подписка на список пользователей
             const usersQ = query(collection(db, ALL_USERS_COLLECTION_PATH));
             onSnapshot(usersQ, (snapshot) => {
                 allUsers = snapshot.docs.map(d => d.data());
+                // console.log("Users updated:", allUsers.length); // Отладка
             }, (error) => {
                 console.error("Ошибка подписки на пользователей:", error);
+                // Показываем ошибку, если правила безопасности неверны
+                if (error.code === 'permission-denied') {
+                    console.error("ПРОВЕРЬТЕ ПРАВИЛА БЕЗОПАСНОСТИ FIRESTORE: Чтение ALL_USERS_COLLECTION_PATH запрещено.");
+                }
             });
             
             renderChatsList([{ chatId: PUBLIC_CHAT_ID, nickname: 'Общий чат' }]);
@@ -543,6 +604,10 @@
             }, (error) => {
                 console.error("Ошибка подписки на сообщения:", error);
                 renderMessages([]);
+                // Показываем ошибку, если правила безопасности неверны
+                if (error.code === 'permission-denied') {
+                    chatMessagesContainer.innerHTML = '<div class="text-center text-red-400 font-bold">ОШИБКА ДОСТУПА. Проверьте правила безопасности Firestore для чатов.</div>';
+                }
             });
         }
 
@@ -651,9 +716,15 @@
             };
 
             try {
-                await setDoc(doc(chatRef), message); // Используем setDoc с пустым doc() для авто-ID
+                // Используем setDoc с doc() для авто-ID, как в предыдущем коде
+                await setDoc(doc(chatRef), message); 
             } catch (e) {
                 console.error("Ошибка при отправке сообщения:", e);
+                // Показываем ошибку, если правила безопасности неверны
+                if (e.code === 'permission-denied') {
+                    console.error("ПРОВЕРЬТЕ ПРАВИЛА БЕЗОПАСНОСТИ FIRESTORE: Запись в чат запрещена.");
+                    // Можно отобразить временное сообщение в UI, но оставим только в консоли
+                }
                 messageInput.value = text;
             } finally {
                 messageInput.disabled = false;
