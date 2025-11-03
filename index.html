@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SecretGram - Онлайн Чат</title>
+    <!-- Подключаем Firebase SDK (глобальный синтаксис) --><script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-database.js"></script>
+    <!-- Иконки Font Awesome для красоты --><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+
+    <style>
+        /* Общие стили */
+        body {
+            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #6dd5ed, #2193b0); /* Красивый градиент */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #333;
+            overflow: hidden; /* Скрыть возможные полосы прокрутки при анимациях */
+        }
+
+        /* Контейнер чата */
+        .chat-container {
+            width: 480px;
+            height: 700px;
+            background-color: white;
+            border-radius: 25px; /* Более мягкие углы */
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.25); /* Глубокая тень */
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+            transform: scale(0.95); /* Немного уменьшим для эффекта */
+            opacity: 0;
+            animation: fadeInScale 0.6s ease-out forwards;
+        }
+
+        @keyframes fadeInScale {
+            to {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        /* Заголовок */
+        .header {
+            background: linear-gradient(45deg, #8A2387, #E94057, #F27121); /* Инстаграм-подобный градиент */
+            color: white;
+            padding: 20px 25px;
+            text-align: left;
+            font-size: 1.6em;
+            font-weight: bold;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky; /* Приклеить шапку */
+            top: 0;
+            z-index: 10;
+        }
+        .header .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .header .user-info i {
+            font-size: 1.2em;
+        }
+        .header .app-name {
+            font-size: 0.7em;
+            opacity: 0.8;
+            margin-top: 2px;
+        }
+
+        /* Область сообщений */
+        #messages {
+            flex-grow: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background-color: #f8f9fa; /* Светлый фон для сообщений */
+            display: flex;
+            flex-direction: column;
+            gap: 15px; /* Промежутки между сообщениями */
+        }
+        #messages::-webkit-scrollbar {
+            width: 8px;
+        }
+        #messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        #messages::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        #messages::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        /* Отдельное сообщение */
+        .message-box {
+            display: flex;
+            align-items: flex-end;
+            max-width: 85%;
+            position: relative;
+        }
+        .message-box.mine {
+            margin-left: auto;
+            flex-direction: row-reverse; /* Для правильного расположения иконок */
+        }
+        .message-box.other {
+            margin-right: auto;
+        }
+        
+        .message-avatar {
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            background-color: #ccc; /* Заглушка для аватара */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 0.9em;
+            font-weight: bold;
+            flex-shrink: 0; /* Не сжимать аватар */
+            margin: 0 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .message-box.mine .message-avatar {
+             background: linear-gradient(45deg, #1de9b6, #00b0ff); /* Градиент для своего аватара */
+        }
+        .message-box.other .message-avatar {
+             background: linear-gradient(45deg, #ff9800, #ffc107); /* Градиент для чужого аватара */
+        }
+
+        .message-content {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message-nick {
+            font-size: 0.78em;
+            color: #777;
+            margin-bottom: 3px;
+            font-weight: 600;
+            align-self: flex-start;
+        }
+        .message-box.mine .message-nick {
+            align-self: flex-end; /* Ник справа для своих */
+        }
+
+        .message-text {
+            padding: 12px 18px;
+            border-radius: 20px;
+            line-height: 1.5;
+            word-wrap: break-word;
+            font-size: 1.0em;
+            position: relative;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08); /* Мягкая тень для сообщений */
+            transition: transform 0.2s ease-out;
+        }
+        .message-text:hover {
+             transform: translateY(-2px);
+        }
+
+        .message-box.mine .message-text {
+            background: linear-gradient(45deg, #007bff, #00c6ff); /* Синий градиент */
+            color: white;
+            border-bottom-right-radius: 5px; /* "Хвостик" */
+        }
+        .message-box.other .message-text {
+            background-color: #e0e0e0; /* Светлый фон */
+            color: #333;
+            border-bottom-left-radius: 5px; /* "Хвостик" */
+        }
+        
+        .message-time {
+            font-size: 0.65em;
+            color: #999;
+            margin-top: 5px;
+            align-self: flex-end;
+        }
+        .message-box.other .message-time {
+            align-self: flex-start;
+        }
+
+
+        /* Область ввода */
+        .input-area {
+            display: flex;
+            padding: 15px 20px;
+            border-top: 1px solid #eee;
+            background-color: #ffffff;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+        }
+        #message-input {
+            flex-grow: 1;
+            padding: 12px 18px;
+            border: 1px solid #e0e0e0;
+            border-radius: 25px; /* Более скругленные */
+            font-size: 1.05em;
+            outline: none;
+            transition: all 0.3s ease;
+            background-color: #f5f5f5;
+        }
+        #message-input:focus {
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.25);
+            background-color: #fff;
+        }
+        #send-button {
+            background: linear-gradient(45deg, #28a745, #20c997); /* Зеленый градиент */
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 1.05em;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        }
+        #send-button:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.15);
+        }
+        #send-button:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Окно для ввода ника */
+        #nick-prompt {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+
+        .nick-box {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            transform: translateY(-20px);
+            opacity: 0;
+            animation: slideIn 0.5s ease-out 0.2s forwards;
+            position: relative;
+        }
+        @keyframes slideIn {
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        .nick-box h3 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            background: -webkit-linear-gradient(45deg, #8A2387, #E94057);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #nick-input {
+            padding: 12px;
+            margin: 20px 0;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            width: 250px;
+            font-size: 1.1em;
+            text-align: center;
+            transition: border-color 0.3s;
+        }
+        #nick-input:focus {
+            border-color: #E94057;
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(233, 64, 87, 0.1);
+        }
+
+        #save-nick-button {
+            background: linear-gradient(45deg, #E94057, #F27121); /* Красивый градиент */
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+        }
+        #save-nick-button:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+        }
+
+        /* Адаптивный дизайн */
+        @media (max-width: 600px) {
+            body {
+                align-items: flex-start; /* Чтобы чат начинался сверху на мобильных */
+                background: linear-gradient(135deg, #6dd5ed, #2193b0); /* Градиент только на фоне */
+            }
+            .chat-container {
+                width: 100%;
+                height: 100vh;
+                border-radius: 0;
+                box-shadow: none;
+                animation: none; /* Отключить анимацию на мобильных */
+                opacity: 1;
+                transform: scale(1);
+            }
+            .header {
+                font-size: 1.4em;
+                padding: 15px 20px;
+            }
+            #messages {
+                padding: 15px;
+            }
+            .input-area {
+                padding: 10px 15px;
+            }
+            #nick-prompt {
+                 padding: 20px;
+            }
+            .nick-box {
+                width: 90%; /* Шире на мобильных */
+                padding: 30px;
+            }
+            #nick-input {
+                width: calc(100% - 24px); /* Учитываем паддинг */
+            }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Окно для ввода ника --><div id="nick-prompt">
+    <div class="nick-box">
+        <h3>👋 SecretGram</h3>
+        <p>Ваш ник будет виден всем в чате.</p>
+        <input type="text" id="nick-input" placeholder="Введите ваш ник..." maxlength="20">
+        <button id="save-nick-button">Начать чат</button>
+    </div>
+</div>
+
+<div class="chat-container">
+    <div class="header">
+        <div class="app-name">SecretGram</div>
+        <div class="user-info">
+             <i class="fas fa-user-circle"></i> <span id="current-nick">Гость</span>
+        </div>
+    </div>
+    <div id="messages">
+        <!-- Сообщения будут здесь --></div>
+    <div class="input-area">
+        <input type="text" id="message-input" placeholder="Написать сообщение..." required>
+        <button id="send-button"><i class="fas fa-paper-plane"></i></button>
+    </div>
+</div>
+
+<script>
+    // == 1. КОНФИГУРАЦИЯ FIREBASE (ВАША КОНФИГУРАЦИЯ) ==
+    const firebaseConfig = {
+      apiKey: "AIzaSyB7OhFZ3fUddcxqieVHFCOvOFCH9b-7GOQ",
+      authDomain: "massengerapk.firebaseapp.com",
+      projectId: "massengerapk",
+      storageBucket: "massengerapk.firebasestorage.app",
+      messagingSenderId: "912634968435",
+      appId: "1:912634968435:web:e63cc68f376f178fd62d06",
+      measurementId: "G-6ZBZKNH8QZ",
+      databaseURL: "https://massengerapk-default-rtdb.firebaseio.com" 
+    };
+    
+    // Инициализация Firebase
+    firebase.initializeApp(firebaseConfig);
+    const database = firebase.database();
+    const chatRef = database.ref('chat/messages'); 
+
+    // == Глобальные переменные ==
+    let userNick = '';
+    const NICK_KEY = 'secretGramNick'; // Изменил ключ для этого приложения
+
+    // == Инициализация ==
+    document.addEventListener('DOMContentLoaded', initChat);
+
+    function initChat() {
+        // Загрузка ника
+        userNick = localStorage.getItem(NICK_KEY);
+        
+        if (userNick) {
+            document.getElementById('nick-prompt').style.display = 'none';
+            document.getElementById('current-nick').textContent = userNick;
+        } else {
+            document.getElementById('nick-prompt').style.display = 'flex';
+        }
+
+        // Назначаем обработчики событий
+        document.getElementById('save-nick-button').addEventListener('click', saveNick);
+        document.getElementById('nick-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                saveNick();
+            }
+        });
+
+        document.getElementById('send-button').addEventListener('click', sendMessage);
+        document.getElementById('message-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // == СЛУШАТЕЛЬ FIREBASE ==
+        chatRef.on('child_added', (snapshot) => {
+            const messageData = snapshot.val();
+            displayMessage(messageData.nick, messageData.text, messageData.timestamp);
+        });
+    }
+
+    // == Функции Ника ==
+    function saveNick() {
+        const input = document.getElementById('nick-input');
+        const nick = input.value.trim();
+
+        if (nick) {
+            userNick = nick;
+            localStorage.setItem(NICK_KEY, userNick);
+            document.getElementById('current-nick').textContent = userNick;
+            
+            // Плавное скрытие окна ввода ника
+            const nickPrompt = document.getElementById('nick-prompt');
+            nickPrompt.style.animation = 'fadeOut 0.4s ease-out forwards';
+            nickPrompt.addEventListener('animationend', () => {
+                nickPrompt.style.display = 'none';
+                nickPrompt.style.animation = ''; // Сбросить анимацию для будущих использований
+            }, { once: true });
+
+        } else {
+            input.placeholder = "Пожалуйста, введите ник!";
+            input.classList.add('input-error'); // Можно добавить класс для стилизации ошибки
+            input.focus();
+        }
+    }
+    
+    // Анимация исчезновения для окна ника
+    const styleSheet = document.createElement("style");
+    styleSheet.type = "text/css";
+    styleSheet.innerText = `@keyframes fadeOut { to { opacity: 0; display: none; } }`;
+    document.head.appendChild(styleSheet);
+
+
+    // == Функции Отображения Сообщений ==
+    function formatTimestamp(timestamp) {
+        if (!timestamp) return '';
+        const date = new Date(timestamp);
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        return `${hours}:${minutes}`;
+    }
+
+    function getAvatarInitial(nick) {
+        return nick ? nick.charAt(0).toUpperCase() : '?';
+    }
+
+    function displayMessage(nick, text, timestamp) {
+        const messagesContainer = document.getElementById('messages');
+        const isMine = nick === userNick;
+
+        const messageBox = document.createElement('div');
+        messageBox.classList.add('message-box', isMine ? 'mine' : 'other');
+        
+        // Аватар
+        const avatar = document.createElement('div');
+        avatar.classList.add('message-avatar');
+        avatar.textContent = getAvatarInitial(nick);
+        messageBox.appendChild(avatar);
+
+        // Контент сообщения (ник + текст + время)
+        const messageContent = document.createElement('div');
+        messageContent.classList.add('message-content');
+
+        // Ник (только для чужих сообщений, или если свои)
+        if (!isMine) { // Чужие сообщения
+             const nickElement = document.createElement('div');
+             nickElement.classList.add('message-nick');
+             nickElement.textContent = nick;
+             messageContent.appendChild(nickElement);
+        } else { // Свои сообщения
+            // Можно добавить ник "Вы" над своим сообщением, но это менее традиционно
+        }
+
+
+        // Текст сообщения
+        const textElement = document.createElement('div');
+        textElement.classList.add('message-text');
+        textElement.textContent = text;
+        messageContent.appendChild(textElement);
+
+        // Время
+        const timeElement = document.createElement('div');
+        timeElement.classList.add('message-time');
+        timeElement.textContent = formatTimestamp(timestamp);
+        messageContent.appendChild(timeElement);
+
+        messageBox.appendChild(messageContent);
+        messagesContainer.appendChild(messageBox);
+        
+        // Прокрутка вниз
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
+
+    // == Функция Отправки Сообщения ==
+    function sendMessage() {
+        if (!userNick) {
+            // Если ник не установлен, показываем окно ввода ника
+            document.getElementById('nick-prompt').style.display = 'flex';
+            document.getElementById('nick-input').focus();
+            return;
+        }
+
+        const inputElement = document.getElementById('message-input');
+        const messageText = inputElement.value.trim();
+
+        if (messageText === "") {
+            return;
+        }
+
+        // Создаем объект сообщения
+        const message = {
+            nick: userNick,
+            text: messageText,
+            timestamp: firebase.database.ServerValue.TIMESTAMP 
+        };
+
+        // Отправляем сообщение в базу данных Firebase
+        chatRef.push(message)
+            .then(() => {
+                inputElement.value = ''; // Очищаем поле ввода
+                inputElement.focus();
+            })
+            .catch(error => {
+                console.error("Ошибка при отправке: ", error);
+                console.log("Не удалось отправить сообщение. Проверьте консоль Firebase.");
+            });
+    }
+</script>
+
+</body>
+</html>
