@@ -317,8 +317,10 @@
          * Выполняет вход или регистрацию с обходом ошибки Firebase Console.
          */
         async function handleAuthAction() {
+            // КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Используем .trim() для очистки от невидимых пробелов
             const email = authEmailInput.value.trim();
             const password = authPasswordInput.value.trim();
+            
             authErrorDisplay.textContent = '';
             
             if (!email || password.length < 6) {
@@ -341,18 +343,22 @@
                 let errorMessage = 'Неизвестная ошибка.';
                 
                 if (error.code === 'auth/operation-not-allowed') {
-                    // FIX: Улучшенное сообщение об ошибке для operation-not-allowed + АНОНИМНЫЙ ОБХОД
-                    errorMessage = 'Провайдер аутентификации Email/Password отключен. Для полноценной работы ВКЛЮЧИТЕ его в Firebase Console. Выполняю анонимный вход для продолжения работы.';
+                    // *** ИСПРАВЛЕНИЕ: Улучшенное сообщение и автоматический обход ***
+                    authErrorDisplay.textContent = 'Провайдер Email/Password отключен. Выполняю автоматический вход...'; 
                     
                     // АНОНИМНЫЙ ОБХОДНОЙ ПУТЬ: Позволяет пользователю начать работу немедленно
                     try {
                         await signInAnonymously(auth);
                         // Если анонимный вход успешен, onAuthStateChanged обработает переход на следующий экран.
+                        // Успех -> return, чтобы избежать finally и обновления кнопок
                         return; 
                     } catch (e) {
-                        errorMessage += " Ошибка анонимного входа: " + e.message;
+                        errorMessage = "Ошибка: Провайдер Email/Password отключен. Не удалось выполнить анонимный вход.";
                     }
 
+                } else if (error.code === 'auth/invalid-email') {
+                    // Улучшенное сообщение, явно указывающее на пробелы или формат
+                    errorMessage = 'Некорректный формат email адреса (отсутствует "@" или есть пробелы). Пожалуйста, проверьте ввод.';
                 } else if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
                     errorMessage = 'Неверный email или пароль.';
                 } else if (error.code === 'auth/email-already-in-use') {
@@ -362,7 +368,7 @@
                 }
 
                 // Показываем ошибку только если обходной путь не сработал
-                authErrorDisplay.textContent = `Ошибка: ${errorMessage}`;
+                authErrorDisplay.textContent = errorMessage.startsWith('Ошибка:') ? errorMessage : `Ошибка: ${errorMessage}`;
             } finally {
                 // Восстанавливаем кнопку, только если не произошел успешный вход/обход
                 if (!auth.currentUser) {
@@ -938,6 +944,7 @@
         </div>
 
         <p class="text-center text-xs text-[#8b949e] mt-8">
+            <span id="current-user-id" class="block truncate">ID: ...</span>
             :: Powered by ThisTeam ::
         </p>
     </div>
