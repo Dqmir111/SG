@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SecretGram - Аутентификация и Чаты</title>
-    <!-- Иконки Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     
     <script type="module">
@@ -64,8 +63,14 @@
         } catch (e) {
             console.error("Критическая ошибка инициализации Firebase SDK:", e);
             document.getElementById('loading-text').textContent = "Критическая ошибка: не удалось инициализировать Firebase SDK.";
-            // Оставляем return, чтобы остановить выполнение скрипта в случае критического сбоя.
-            // При этом UI останется доступным.
+            return;
+        }
+
+        /**
+         * Скрывает экран загрузки и показывает либо чат, либо форму аутентификации.
+         */
+        function hideLoadingOverlay() {
+            document.getElementById('loading-overlay').style.display = 'none';
         }
 
         /**
@@ -94,36 +99,60 @@
                     currentUserId = null;
                     userNick = null;
                     chatContainer.style.display = 'none';
-                    document.getElementById('auth-prompt').style.display = 'flex';
+                    // Если пользователь не вошел, показываем форму аутентификации
+                    document.getElementById('auth-prompt').style.display = 'flex'; 
                     if (chatListener) {
                         chatListener(); 
                         chatListener = null;
                     }
                     document.getElementById('messages').innerHTML = '';
+                    clearAuthError(); // Очищаем ошибки при выходе
                 }
                 
-                // Скрываем спиннер загрузки
-                document.getElementById('loading-overlay').style.display = 'none';
+                // Скрываем спиннер загрузки только после первой проверки состояния
+                hideLoadingOverlay();
             });
         }
         
         /**
-         * Автоматическая аутентификация при наличии токена Canvas.
+         * Автоматическая аутентификация при наличии токена Canvas (Custom Token) или Анонимно.
          */
-        async function authenticateWithToken() {
-            if (!auth) return; // Проверка, что auth инициализирован
-            
-            if (initialAuthToken) {
-                try {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } catch (error) {
-                    console.error("Ошибка авторизации с токеном Canvas:", error);
-                    await signInAnonymously(auth);
-                }
-            } else {
-                await signInAnonymously(auth);
-            }
-        }
+        async function runAuthentication() {
+             if (!auth) return;
+             
+             // 1. Попытка входа с токеном Canvas (более высокий приоритет)
+             if (initialAuthToken) {
+                 try {
+                     console.log("Попытка входа с токеном Canvas...");
+                     await signInWithCustomToken(auth, initialAuthToken);
+                     console.log("Вход с токеном Canvas успешен.");
+                     return; 
+                 } catch (error) {
+                     console.error("Ошибка авторизации с токеном Canvas. Переход к анонимному входу:", error);
+                 }
+             }
+
+             // 2. Попытка анонимного входа с таймаутом
+             const AUTH_TIMEOUT_MS = 3000;
+             const timeoutPromise = new Promise((_, reject) => {
+                 setTimeout(() => reject(new Error('Auth Timeout')), AUTH_TIMEOUT_MS);
+             });
+             
+             try {
+                 console.log("Попытка анонимного входа...");
+                 await Promise.race([
+                     signInAnonymously(auth),
+                     timeoutPromise
+                 ]);
+                 console.log("Анонимный вход успешен.");
+             } catch (error) {
+                 if (error.message === 'Auth Timeout') {
+                     console.warn("Таймаут аутентификации (3с). Дальнейшая аутентификация будет обрабатываться onAuthStateChanged.");
+                 } else {
+                     console.error("Критическая ошибка анонимного входа:", error);
+                 }
+             }
+         }
 
         /**
          * Получает профиль пользователя (ник) из Firestore.
@@ -145,6 +174,20 @@
             }
         }
 
+        // == УПРАВЛЕНИЕ ОШИБКАМИ АУТЕНТИФИКАЦИИ В UI ==
+        function displayAuthError(message) {
+            const errorElement = document.getElementById('auth-error-message');
+            errorElement.textContent = message;
+            errorElement.style.display = 'block';
+        }
+        
+        function clearAuthError() {
+            const errorElement = document.getElementById('auth-error-message');
+            errorElement.textContent = '';
+            errorElement.style.display = 'none';
+        }
+
+
         // == ОБРАБОТЧИКИ АУТЕНТИФИКАЦИИ (Login/Register) ==
 
         function getAuthData() {
@@ -159,10 +202,11 @@
         }
 
         async function handleRegister() {
+            clearAuthError();
             const { email, password, nick } = getAuthData();
 
-            if (nick.length < 3) { console.error("Ник должен быть не менее 3 символов."); return; }
-            if (password.length < 6) { console.error("Пароль должен быть не менее 6 символов."); return; }
+            if (nick.length < 3) { displayAuthError("Ник должен быть не менее 3 символов."); return; }
+            if (password.length < 6) { displayAuthError("Пароль должен быть не менее 6 символов."); return; }
             
             try {
                 const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -176,13 +220,24 @@
                 playNotificationSound(); 
             } catch (error) {
                 console.error("Ошибка регистрации:", error.message);
+                
+                let userMessage = "Ошибка регистрации.";
+                if (error.code === 'auth/operation-not-allowed') {
+                    userMessage = "Ошибка: Аутентификация по Email/Паролю не включена в настройках вашего проекта Firebase. Пожалуйста, включите ее.";
+                } else if (error.code === 'auth/email-already-in-use') {
+                    userMessage = "Данное имя пользователя уже занято. Попробуйте войти или выберите другое.";
+                } else {
+                    userMessage = error.message;
+                }
+                displayAuthError(userMessage);
             }
         }
         
         async function handleLogin() {
+            clearAuthError();
             const { email, password } = getAuthData();
 
-            if (password.length < 6) { console.error("Пароль должен быть не менее 6 символов."); return; }
+            if (password.length < 6) { displayAuthError("Пароль должен быть не менее 6 символов."); return; }
 
             try {
                 await signInWithEmailAndPassword(auth, email, password);
@@ -190,6 +245,16 @@
                 playNotificationSound(); 
             } catch (error) {
                 console.error("Ошибка входа:", error.message);
+                
+                let userMessage = "Ошибка входа. Проверьте имя пользователя и пароль.";
+                 if (error.code === 'auth/operation-not-allowed') {
+                    userMessage = "Ошибка: Аутентификация по Email/Паролю не включена в настройках вашего проекта Firebase. Пожалуйста, включите ее.";
+                } else if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found') {
+                    userMessage = "Неверное имя пользователя или пароль.";
+                } else {
+                    userMessage = error.message;
+                }
+                displayAuthError(userMessage);
             }
         }
 
@@ -407,6 +472,7 @@
 
         // Переключение между формой входа и регистрации
         function toggleAuthMode() {
+            clearAuthError();
             const isLogin = document.getElementById('auth-button').textContent === 'Войти';
             document.getElementById('auth-nick-group').style.display = isLogin ? 'block' : 'none';
             document.getElementById('auth-title').textContent = isLogin ? 'Регистрация в SecretGram' : 'Вход в SecretGram';
@@ -419,7 +485,7 @@
         document.addEventListener('DOMContentLoaded', () => {
             // Если инициализация Firebase не удалась в секции try/catch, выходим
             if (!auth || !db) {
-                // Если auth или db null, отображаем сообщение об ошибке, но не останавливаем DOMContentLoaded
+                // Если auth или db null, отображаем сообщение об ошибке
                  document.getElementById('loading-overlay').style.display = 'flex';
                  document.getElementById('loading-spinner').style.display = 'none';
                  document.getElementById('loading-text').textContent = "Ошибка: Firebase SDK не инициализирован. Проверьте вашу конфигурацию.";
@@ -442,7 +508,8 @@
             document.getElementById('toggle-auth-mode').addEventListener('click', toggleAuthMode);
             
             // Запускаем процесс аутентификации
-            authenticateWithToken().then(setupAuthStateListener);
+            setupAuthStateListener(); // Сначала устанавливаем слушатель изменений состояния
+            runAuthentication();      // Затем запускаем попытку аутентификации
         });
 
     </script>
@@ -469,6 +536,7 @@
             --bg-input-container: #ffffff;
             --auth-box-bg: #ffffff;
             --auth-button-gradient: linear-gradient(45deg, #007bff, #00c6ff);
+            --color-error: #dc3545;
         }
 
         /* DARK THEME STYLES */
@@ -488,6 +556,7 @@
             --bg-input-container: #1a1a1a;
             --auth-box-bg: #1a1a1a;
             --auth-button-gradient: linear-gradient(45deg, #00b0ff, #5e00b3);
+            --color-error: #ff6347;
         }
 
 
@@ -750,7 +819,7 @@
             top: 0; left: 0; right: 0; bottom: 0;
             background-color: rgba(0, 0, 0, 0.85); 
             backdrop-filter: blur(8px); 
-            display: flex;
+            display: none; /* Скрыто по умолчанию */
             justify-content: center;
             align-items: center;
             z-index: 1000;
@@ -801,6 +870,19 @@
             box-shadow: 0 0 10px rgba(233, 64, 87, 0.2);
             outline: none;
         }
+        
+        /* Стиль для сообщения об ошибке */
+        #auth-error-message {
+            display: none;
+            background-color: rgba(220, 53, 69, 0.1);
+            color: var(--color-error);
+            border: 1px solid var(--color-error);
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 0.9em;
+            text-align: center;
+        }
 
         #auth-button {
             width: 100%;
@@ -843,6 +925,7 @@
             color: white;
             font-size: 1.2em;
             z-index: 1001;
+            transition: opacity 0.4s ease-out;
         }
         #loading-spinner {
             border: 4px solid rgba(255, 255, 255, 0.3);
@@ -867,18 +950,18 @@
 </head>
 <body class="light-theme">
 
-<!-- Экран загрузки (показывается, пока идет аутентификация) -->
 <div id="loading-overlay">
     <div id="loading-spinner"></div>
     <div id="loading-text">Подключение к SecretGram...</div>
 </div>
 
 
-<!-- Окно Аутентификации -->
-<div id="auth-prompt" style="display: none;">
+<div id="auth-prompt">
     <div class="auth-box">
         <h3 id="auth-title">Вход в SecretGram</h3>
         
+        <div id="auth-error-message"></div>
+
         <div class="auth-input-group" id="auth-nick-group" style="display: none;">
             <label for="auth-nick">Ник (будет виден всем)</label>
             <input type="text" id="auth-nick" placeholder="Введите ваш ник..." maxlength="20">
@@ -923,8 +1006,7 @@
     </div>
 
     <div id="messages">
-        <!-- Сообщения будут здесь -->
-    </div>
+        </div>
     <div class="input-area">
         <input type="text" id="message-input" placeholder="Написать сообщение..." required>
         <button id="send-button"><i class="fas fa-paper-plane"></i></button>
