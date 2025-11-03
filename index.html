@@ -3,1268 +3,497 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SecretGram - Аутентификация и Чаты</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    
-    <script type="module">
-        // == КОНФИГУРАЦИЯ FIREBASE (ИСПОЛЬЗУЕТСЯ ВАША) ==
-        const userProvidedConfig = {
-            apiKey: "AIzaSyB7OhFZ3fUddcxqieVHFCOvOFCH9b-7GOQ",
-            authDomain: "massengerapk.firebaseapp.com",
-            databaseURL: "https://massengerapk-default-rtdb.firebaseio.com",
-            projectId: "massengerapk",
-            storageBucket: "massengerapk.firebasestorage.app",
-            messagingSenderId: "912634968435",
-            appId: "1:912634968435:web:e63cc68f376f178fd62d06",
-            measurementId: "G-6ZBZKNH8QZ"
-        };
-        
-        // Глобальные переменные Canvas (обязательно для Firestore)
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        // Определяем, какую конфигурацию использовать
-        let firebaseConfig = userProvidedConfig;
-        
-        if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-            try {
-                const parsedConfig = JSON.parse(__firebase_config);
-                if (parsedConfig && Object.keys(parsedConfig).length > 0 && parsedConfig.projectId) {
-                    firebaseConfig = parsedConfig; 
-                }
-            } catch (e) {
-                console.warn("Ошибка парсинга __firebase_config. Используется предоставленная пользователем конфигурация.");
-            }
-        }
-        // ===============================================
-
-
-        // Импорты Firebase (v9 modules)
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, onSnapshot, collection, query, addDoc, getDoc, setDoc, serverTimestamp, setLogLevel, updateDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        
-        // Глобальные переменные Firebase
-        let app, auth, db;
-        let userNick = null;
-        let currentUserId = null;
-        let chatListener = null;
-        let currentChatId = 'general';
-        let audioContext = null;
-        let privateChats = {}; // {chatId: {partnerId, partnerNick}}
-
-        // == ИНИЦИАЛИЗАЦИЯ FIREBASE ==
-        try {
-            app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getFirestore(app);
-            setLogLevel('Debug'); 
-        } catch (e) {
-            console.error("Критическая ошибка инициализации Firebase SDK:", e);
-            document.getElementById('loading-text').textContent = "Критическая ошибка: не удалось инициализировать Firebase SDK.";
-            return;
-        }
-
-        /**
-         * Управление видимостью оверлеев.
-         */
-        function hideAllOverlays() {
-            document.getElementById('loading-overlay').style.display = 'none';
-            document.getElementById('auth-prompt').style.display = 'none';
-            document.getElementById('profile-overlay').style.display = 'none';
-            document.querySelector('.chat-container').style.display = 'flex';
-        }
-
-        function showLoadingOverlay() {
-            document.getElementById('loading-overlay').style.display = 'flex';
-        }
-
-        function showAuthPrompt() {
-            document.getElementById('auth-prompt').style.display = 'flex';
-            document.querySelector('.chat-container').style.display = 'none';
-        }
-        
-        function toggleProfileOverlay(show) {
-            const overlay = document.getElementById('profile-overlay');
-            if (show) {
-                overlay.style.display = 'flex';
-                document.querySelector('.chat-container').style.display = 'none';
-                loadProfileData(); 
-            } else {
-                overlay.style.display = 'none';
-                document.querySelector('.chat-container').style.display = 'flex';
-            }
-        }
-        
-        // Привязываем функцию закрытия профиля к кнопке
-        document.getElementById('close-profile-btn').addEventListener('click', () => toggleProfileOverlay(false));
-        document.getElementById('settings-button').addEventListener('click', () => toggleProfileOverlay(true));
-
-
-        /**
-         * Устанавливает слушатель изменений состояния аутентификации.
-         */
-        function setupAuthStateListener() {
-            onAuthStateChanged(auth, async (user) => {
-                if (user) {
-                    currentUserId = user.uid;
-                    await fetchUserProfile(user.uid); 
-                    
-                    hideAllOverlays();
-                    loadProfileData(); // Загружаем данные в память для отображения
-                    loadChat(currentChatId);
-                    // loadPrivateChats(); // Загружаем личные чаты (реализуем позже)
-                } else {
-                    currentUserId = null;
-                    userNick = null;
-                    showAuthPrompt();
-                    if (chatListener) {
-                        chatListener(); 
-                        chatListener = null;
-                    }
-                    document.getElementById('messages').innerHTML = '';
-                    clearAuthError(); 
-                }
-                
-                showLoadingOverlay().style.display = 'none';
-            });
-        }
-        
-        /**
-         * Автоматическая аутентификация при наличии токена Canvas (Custom Token) или Анонимно.
-         */
-        async function runAuthentication() {
-             if (!auth) return;
-             
-             // ... (логика входа с токеном Canvas и таймаутом анонимного входа, как в предыдущем коде) ...
-             if (initialAuthToken) {
-                 try {
-                     await signInWithCustomToken(auth, initialAuthToken);
-                     return; 
-                 } catch (error) {
-                     console.error("Ошибка авторизации с токеном Canvas. Переход к анонимному входу:", error);
-                 }
-             }
-
-             const AUTH_TIMEOUT_MS = 3000;
-             const timeoutPromise = new Promise((_, reject) => {
-                 setTimeout(() => reject(new Error('Auth Timeout')), AUTH_TIMEOUT_MS);
-             });
-             
-             try {
-                 await Promise.race([
-                     signInAnonymously(auth),
-                     timeoutPromise
-                 ]);
-             } catch (error) {
-                 if (error.message !== 'Auth Timeout') {
-                     console.error("Критическая ошибка анонимного входа:", error);
-                 }
-             }
-         }
-
-        /**
-         * Получает профиль пользователя (ник, о себе) из Firestore.
-         */
-        async function fetchUserProfile(uid) {
-            const profileRef = doc(db, `artifacts/${appId}/users/${uid}/profiles/myProfile`);
-            try {
-                const profileSnap = await getDoc(profileRef);
-                if (profileSnap.exists()) {
-                    const data = profileSnap.data();
-                    userNick = data.nick;
-                    window.currentUserAbout = data.about || 'Любые подробности, например: возраст, род занятий или город.';
-                } else {
-                    userNick = `User-${uid.substring(0, 4)}`;
-                    window.currentUserAbout = 'Любые подробности, например: возраст, род занятий или город.';
-                    await setDoc(profileRef, { nick: userNick, about: window.currentUserAbout, createdAt: serverTimestamp() }, { merge: true });
-                }
-            } catch (error) {
-                console.error("Ошибка получения профиля:", error);
-                userNick = `User-${uid.substring(0, 4)}`;
-                window.currentUserAbout = 'Любые подробности, например: возраст, род занятий или город.';
-            }
-        }
-        
-        /**
-         * Загружает данные профиля в UI секции "Профиль".
-         */
-        function loadProfileData() {
-            if (!currentUserId) return;
-            
-            document.getElementById('profile-nick').textContent = userNick || "Гость";
-            document.getElementById('profile-id').textContent = `@${currentUserId.substring(0, 8)}`; // Вместо номера телефона, показываем ID
-            document.getElementById('profile-about-text').textContent = window.currentUserAbout;
-            document.getElementById('profile-avatar-initial').textContent = userNick ? userNick.charAt(0).toUpperCase() : '?';
-        }
-        
-        /**
-         * Сохраняет отредактированный текст "О себе".
-         */
-        async function saveAboutMe() {
-             if (!currentUserId) return;
-             const newAbout = document.getElementById('profile-about-input').value.trim();
-             if (newAbout.length > 200) {
-                 alert('Текст "О себе" не должен превышать 200 символов.');
-                 return;
-             }
-             
-             try {
-                 const profileRef = doc(db, `artifacts/${appId}/users/${currentUserId}/profiles/myProfile`);
-                 await updateDoc(profileRef, { about: newAbout });
-                 window.currentUserAbout = newAbout;
-                 document.getElementById('profile-about-text').textContent = newAbout;
-                 
-                 // Скрываем форму редактирования и показываем текст
-                 document.getElementById('profile-about-text').style.display = 'block';
-                 document.getElementById('profile-about-edit').style.display = 'none';
-                 document.getElementById('edit-about-btn').innerHTML = '<i class="fas fa-edit"></i> Изменить';
-                 
-                 console.log("Профиль обновлен.");
-             } catch (error) {
-                 console.error("Ошибка сохранения профиля:", error);
-                 alert('Не удалось сохранить изменения. Проверьте правила Firestore.');
-             }
-        }
-        
-        /**
-         * Переключает режим редактирования "О себе".
-         */
-        function toggleAboutEdit() {
-            const textEl = document.getElementById('profile-about-text');
-            const editEl = document.getElementById('profile-about-edit');
-            const btn = document.getElementById('edit-about-btn');
-            
-            if (editEl.style.display === 'none' || editEl.style.display === '') {
-                // Включаем редактирование
-                editEl.style.display = 'block';
-                textEl.style.display = 'none';
-                document.getElementById('profile-about-input').value = window.currentUserAbout;
-                btn.innerHTML = '<i class="fas fa-check"></i> Сохранить';
-                btn.onclick = saveAboutMe;
-            } else {
-                // Отключаем редактирование и сохраняем
-                saveAboutMe();
-            }
-        }
-        
-        // Привязываем функцию редактирования
-        document.getElementById('edit-about-btn').addEventListener('click', toggleAboutEdit);
-
-
-        // ... (Функции УПРАВЛЕНИЯ ОШИБКАМИ АУТЕНТИФИКАЦИИ В UI, ОБРАБОТЧИКИ АУТЕНТИФИКАЦИИ, УПРАВЛЕНИЕ АУДИО - без изменений) ...
-        function displayAuthError(message) {
-            const errorElement = document.getElementById('auth-error-message');
-            errorElement.textContent = message;
-            errorElement.style.display = 'block';
-        }
-        
-        function clearAuthError() {
-            const errorElement = document.getElementById('auth-error-message');
-            errorElement.textContent = '';
-            errorElement.style.display = 'none';
-        }
-
-        function getAuthData() {
-            const emailInput = document.getElementById('auth-email');
-            const passwordInput = document.getElementById('auth-password');
-            const nickInput = document.getElementById('auth-nick');
-            const email = emailInput.value.trim().toLowerCase() + "@secretgram.co"; 
-            const password = passwordInput.value.trim();
-            const nick = nickInput.value.trim();
-            return { email, password, nick };
-        }
-
-        async function handleRegister() {
-            clearAuthError();
-            const { email, password, nick } = getAuthData();
-
-            if (nick.length < 3) { displayAuthError("Ник должен быть не менее 3 символов."); return; }
-            if (password.length < 6) { displayAuthError("Пароль должен быть не менее 6 символов."); return; }
-            
-            try {
-                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-                const user = userCredential.user;
-                
-                const profileRef = doc(db, `artifacts/${appId}/users/${user.uid}/profiles/myProfile`);
-                await setDoc(profileRef, { nick: nick, email: user.email, createdAt: serverTimestamp(), about: 'Любые подробности, например: возраст, род занятий или город.' });
-                
-                userNick = nick;
-                console.log("Регистрация успешна!");
-                playNotificationSound(); 
-            } catch (error) {
-                let userMessage = "Ошибка регистрации.";
-                if (error.code === 'auth/operation-not-allowed') {
-                    userMessage = "Ошибка: Аутентификация по Email/Паролю не включена в настройках вашего проекта Firebase. Пожалуйста, включите ее.";
-                } else if (error.code === 'auth/email-already-in-use') {
-                    userMessage = "Данное имя пользователя уже занято. Попробуйте войти или выберите другое.";
-                } else {
-                    userMessage = error.message;
-                }
-                displayAuthError(userMessage);
-            }
-        }
-        
-        async function handleLogin() {
-            clearAuthError();
-            const { email, password } = getAuthData();
-
-            if (password.length < 6) { displayAuthError("Пароль должен быть не менее 6 символов."); return; }
-
-            try {
-                await signInWithEmailAndPassword(auth, email, password);
-                console.log("Вход успешен!");
-                playNotificationSound(); 
-            } catch (error) {
-                let userMessage = "Ошибка входа. Проверьте имя пользователя и пароль.";
-                 if (error.code === 'auth/operation-not-allowed') {
-                    userMessage = "Ошибка: Аутентификация по Email/Паролю не включена в настройках вашего проекта Firebase. Пожалуйста, включите ее.";
-                } else if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found') {
-                    userMessage = "Неверное имя пользователя или пароль.";
-                } else {
-                    userMessage = error.message;
-                }
-                displayAuthError(userMessage);
-            }
-        }
-
-        const MESSAGE_SEND_DELAY = 1500; 
-
-        function playNotificationSound() {
-            try {
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                }
-
-                const oscillator = audioContext.createOscillator();
-                const gainNode = audioContext.createGain();
-
-                oscillator.connect(gainNode);
-                gainNode.connect(audioContext.destination);
-
-                oscillator.type = 'sine'; 
-                oscillator.frequency.setValueAtTime(440, audioContext.currentTime); 
-                gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-                gainNode.gain.linearRampToValueAtTime(0.1, audioContext.currentTime + 0.01);
-                
-                oscillator.start();
-                gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.3);
-                oscillator.stop(audioContext.currentTime + 0.3);
-            } catch (e) {
-                console.warn("Ошибка воспроизведения звука:", e);
-            }
-        }
-        
-        // == УПРАВЛЕНИЕ ЧАТАМИ (FIRESTORE) ==
-        
-        function getChatCollectionRef(chatId) {
-            // Публичный путь для общего доступа
-            return collection(db, `artifacts/${appId}/public/data/chats/${chatId}/messages`);
-        }
-        
-        function loadChat(chatId) {
-            // ... (логика загрузки сообщений из Firestore - без изменений) ...
-             if (!currentUserId || !db) return;
-
-            const messagesContainer = document.getElementById('messages');
-            const chatHeader = document.getElementById('chat-active-name');
-            
-            if (chatId === 'general') {
-                chatHeader.textContent = 'Общий чат';
-            } else if (chatId === 'secret') {
-                chatHeader.textContent = 'Секретный чат';
-            } else {
-                 chatHeader.textContent = 'Личный чат'; // Здесь будет ник партнера
-            }
-            
-            if (chatListener) {
-                chatListener(); 
-                chatListener = null;
-            }
-            
-            messagesContainer.innerHTML = '';
-            
-            const chatCollectionRef = getChatCollectionRef(chatId);
-            
-            const q = query(chatCollectionRef); 
-            
-            chatListener = onSnapshot(q, (snapshot) => {
-                
-                const allMessages = snapshot.docs.map(doc => {
-                    const data = doc.data();
-                    return {
-                        id: doc.id,
-                        nick: data.nick,
-                        text: data.text,
-                        timestamp: data.timestamp ? data.timestamp.toDate().getTime() : Date.now()
-                    };
-                });
-
-                allMessages.sort((a, b) => a.timestamp - b.timestamp);
-                
-                messagesContainer.innerHTML = ''; 
-                allMessages.forEach(msg => {
-                    displayMessage(msg.nick, msg.text, msg.timestamp);
-                });
-                
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                
-            }, (error) => {
-                console.error("Ошибка получения сообщений Firestore:", error);
-            });
-        }
-        
-        function switchChat(chatId) {
-            if (currentChatId === chatId) return;
-            currentChatId = chatId;
-            
-            document.querySelectorAll('.chat-tab').forEach(tab => tab.classList.remove('active'));
-            document.getElementById(`tab-${chatId}`).classList.add('active');
-            
-            loadChat(chatId);
-        }
-
-        async function sendMessage() {
-            // ... (логика отправки сообщения - без изменений) ...
-             if (!userNick || !currentUserId) {
-                console.error("Пользователь не авторизован.");
-                return;
-            }
-
-            const inputElement = document.getElementById('message-input');
-            const sendButton = document.getElementById('send-button');
-            const messageText = inputElement.value.trim();
-
-            if (messageText === "" || sendButton.disabled) {
-                return;
-            }
-            
-            sendButton.disabled = true;
-            sendButton.innerHTML = '<i class="fas fa-spinner spinner"></i>'; 
-            inputElement.disabled = true;
-
-            const chatCollectionRef = getChatCollectionRef(currentChatId);
-
-            setTimeout(async () => {
-                const message = {
-                    nick: userNick,
-                    text: messageText,
-                    uid: currentUserId,
-                    timestamp: serverTimestamp() 
-                };
-
-                try {
-                    await addDoc(chatCollectionRef, message);
-                    
-                    inputElement.value = '';
-                    inputElement.disabled = false;
-                    sendButton.disabled = false;
-                    sendButton.innerHTML = '<i class="fas fa-paper-plane"></i>';
-                    inputElement.focus();
-                } catch (error) {
-                    console.error("Ошибка при отправке: ", error);
-                    inputElement.disabled = false;
-                    sendButton.disabled = false;
-                    sendButton.innerHTML = '<i class="fas fa-paper-plane"></i>';
-                }
-            }, MESSAGE_SEND_DELAY);
-        }
-
-        // == ФУНКЦИИ УПРАВЛЕНИЯ UI (без изменений) ==
-        
-        function formatTimestamp(timestamp) {
-            if (!timestamp) return '';
-            const date = new Date(timestamp);
-            const hours = String(date.getHours()).padStart(2, '0');
-            const minutes = String(date.getMinutes()).padStart(2, '0');
-            return `${hours}:${minutes}`;
-        }
-
-        function getAvatarInitial(nick) {
-            return nick ? nick.charAt(0).toUpperCase() : '?';
-        }
-
-        function displayMessage(nick, text, timestamp) {
-            const messagesContainer = document.getElementById('messages');
-            const isMine = nick === userNick;
-
-            const messageBox = document.createElement('div');
-            messageBox.classList.add('message-box', isMine ? 'mine' : 'other');
-            
-            const avatar = document.createElement('div');
-            avatar.classList.add('message-avatar');
-            avatar.textContent = getAvatarInitial(nick);
-            
-            const messageContent = document.createElement('div');
-            messageContent.classList.add('message-content');
-
-            if (!isMine) {
-                 const nickElement = document.createElement('div');
-                 nickElement.classList.add('message-nick');
-                 nickElement.textContent = nick;
-                 messageContent.appendChild(nickElement);
-            }
-
-            const textElement = document.createElement('div');
-            textElement.classList.add('message-text');
-            textElement.textContent = text;
-            
-            const timeElement = document.createElement('span');
-            timeElement.classList.add('message-time');
-            timeElement.textContent = formatTimestamp(timestamp);
-            textElement.appendChild(timeElement); 
-            
-            messageContent.appendChild(textElement);
-
-            if (isMine) {
-                 messageBox.appendChild(messageContent);
-                 messageBox.appendChild(avatar);
-            } else {
-                 messageBox.appendChild(avatar);
-                 messageBox.appendChild(messageContent);
-            }
-            
-            messagesContainer.appendChild(messageBox);
-        }
-        
-        function toggleTheme() {
-            const isDark = document.body.classList.contains('dark-theme');
-            const newTheme = isDark ? 'light' : 'dark';
-            if (newTheme === 'dark') {
-                document.body.classList.add('dark-theme');
-            } else {
-                document.body.classList.remove('dark-theme');
-            }
-        }
-
-        function toggleAuthMode() {
-            clearAuthError();
-            const isLogin = document.getElementById('auth-button').textContent === 'Войти';
-            document.getElementById('auth-nick-group').style.display = isLogin ? 'block' : 'none';
-            document.getElementById('auth-title').textContent = isLogin ? 'Регистрация в SecretGram' : 'Вход в SecretGram';
-            document.getElementById('auth-button').textContent = isLogin ? 'Зарегистрироваться' : 'Войти';
-            document.getElementById('toggle-auth-mode').textContent = isLogin ? 'Уже есть аккаунт? Вход' : 'Нет аккаунта? Регистрация';
-            document.getElementById('auth-button').onclick = isLogin ? handleRegister : handleLogin;
-        }
-
-        // == ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ==
-        document.addEventListener('DOMContentLoaded', () => {
-            if (!auth || !db) {
-                 document.getElementById('loading-overlay').style.display = 'flex';
-                 document.getElementById('loading-spinner').style.display = 'none';
-                 document.getElementById('loading-text').textContent = "Ошибка: Firebase SDK не инициализирован. Проверьте вашу конфигурацию.";
-                 return;
-            }
-            
-            // Назначаем обработчики UI
-            document.getElementById('send-button').addEventListener('click', sendMessage);
-            document.getElementById('message-input').addEventListener('keypress', function(e) { if (e.key === 'Enter') sendMessage(); });
-            document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
-            document.getElementById('logout-button').addEventListener('click', () => signOut(auth));
-            
-            // Навигация по чатам
-            document.getElementById('tab-general').addEventListener('click', () => switchChat('general'));
-            document.getElementById('tab-secret').addEventListener('click', () => switchChat('secret'));
-            
-            // Инициализация формы аутентификации
-            document.getElementById('auth-nick-group').style.display = 'none'; 
-            document.getElementById('auth-button').addEventListener('click', handleLogin);
-            document.getElementById('toggle-auth-mode').addEventListener('click', toggleAuthMode);
-            
-            // Запускаем процесс аутентификации
-            setupAuthStateListener(); 
-            runAuthentication();      
-        });
-
-    </script>
-    
-
+    <title>SecretGram Messenger</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-        /* CSS Variables for Theme Management */
-        :root {
-            /* Light Theme Defaults */
-            --bg-body: linear-gradient(135deg, #6dd5ed, #2193b0);
-            --bg-container: #ffffff;
-            --color-text-primary: #333;
-            --color-text-secondary: #777;
-            --bg-messages: #f8f9fa; 
-            --bg-message-mine: linear-gradient(45deg, #007bff, #00c6ff);
-            --bg-message-other: #e0e0e0;
-            --color-message-mine: white;
-            --color-message-other: #333;
-            --shadow-primary: 0 15px 40px rgba(0, 0, 0, 0.25);
-            --bg-input: #f5f5f5;
-            --border-input: #e0e0e0;
-            --bg-tab-active: #E94057;
-            --color-tab-active: white;
-            --bg-input-container: #ffffff;
-            --auth-box-bg: #ffffff;
-            --auth-button-gradient: linear-gradient(45deg, #007bff, #00c6ff);
-            --color-error: #dc3545;
-            --bg-profile: #f8f9fa; /* Добавлено */
-            --border-profile: #e9ecef; /* Добавлено */
-        }
-
-        /* DARK THEME STYLES */
-        .dark-theme {
-            --bg-body: #0a0a0a; 
-            --bg-container: #1a1a1a; 
-            --color-text-primary: #e0e0e0;
-            --color-text-secondary: #aaaaaa;
-            --bg-messages: #121212; 
-            --bg-message-mine: linear-gradient(45deg, #5e00b3, #b400ff); 
-            --bg-message-other: #333333;
-            --color-message-mine: white;
-            --color-message-other: #f0f0f0;
-            --shadow-primary: 0 15px 40px rgba(0, 0, 0, 0.7);
-            --bg-input: #2a2a2a;
-            --border-input: #444;
-            --bg-input-container: #1a1a1a;
-            --auth-box-bg: #1a1a1a;
-            --auth-button-gradient: linear-gradient(45deg, #00b0ff, #5e00b3);
-            --color-error: #ff6347;
-            --bg-profile: #2a2a2a; /* Добавлено */
-            --border-profile: #444444; /* Добавлено */
-        }
-
-
-        /* Общие стили */
         body {
             font-family: 'Inter', sans-serif;
-            margin: 0;
-            padding: 0;
-            background: var(--bg-body);
+            background-color: #0d1117; /* Dark background */
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
-            color: var(--color-text-primary);
-            overflow: hidden;
-            transition: background 0.5s ease, color 0.5s;
+            margin: 0;
         }
-        
-        .chat-container {
-            width: 480px;
-            height: 700px;
-            background-color: var(--bg-container);
-            border-radius: 25px;
-            box-shadow: var(--shadow-primary);
-            display: none; 
-            flex-direction: column;
-            overflow: hidden;
-            position: relative;
-            opacity: 0;
-            animation: fadeInScale 0.6s ease-out forwards;
-            transition: background-color 0.5s, box-shadow 0.5s;
-        }
-        @keyframes fadeInScale { to { opacity: 1; transform: scale(1); } }
-
-        /* Заголовок */
-        .header {
-            background: linear-gradient(45deg, #8A2387, #E94057, #F27121);
-            color: white;
-            padding: 15px 25px;
-            font-size: 1.6em;
-            font-weight: bold;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            z-index: 10;
-        }
-        .header .controls {
-            display: flex;
-            gap: 15px;
-            align-items: center;
-        }
-        
-        /* Кнопка настроек (Профиль) */
-        #settings-button {
-            background: none;
-            border: none;
-            color: white;
-            font-size: 1.2em;
-            cursor: pointer;
-            transition: transform 0.2s;
-            outline: none;
-        }
-        #settings-button:hover { transform: scale(1.1); }
-        
-        /* Дополнительный заголовок для имени чата */
-        .chat-active-header {
-             padding: 10px 20px;
-             font-size: 1.1em;
-             font-weight: 600;
-             text-align: center;
-             background-color: var(--bg-container); 
-             border-bottom: 1px solid var(--border-input);
-             color: var(--color-text-primary);
-        }
-
-        /* Переключатель Темы */
-        #theme-toggle {
-            background: none;
-            border: none;
-            color: white;
-            font-size: 1.2em;
-            cursor: pointer;
-            transition: transform 0.2s;
-            outline: none;
-        }
-        #theme-toggle:hover { transform: scale(1.1); }
-        .dark-theme #theme-toggle .fa-sun { display: inline-block; }
-        .dark-theme #theme-toggle .fa-moon { display: none; }
-        #theme-toggle .fa-sun { display: none; }
-        
-        #logout-button {
-            background: none;
-            border: none;
-            color: white;
-            font-size: 1.2em;
-            cursor: pointer;
-            transition: color 0.2s;
-            outline: none;
-        }
-        #logout-button:hover { color: #f27121; }
-
-        /* Навигация по Чатам (Табы) */
-        .chat-navigation {
-            display: flex;
-            justify-content: space-around;
-            background-color: var(--bg-container); 
-            padding: 10px 0;
-            border-bottom: 1px solid var(--border-input);
-            box-shadow: 0 1px 5px rgba(0, 0, 0, 0.05);
-            transition: background-color 0.5s, border-bottom-color 0.5s;
-        }
-        .chat-tab {
-            flex-grow: 1;
-            text-align: center;
-            padding: 8px 15px;
-            cursor: pointer;
-            font-weight: 600;
-            color: var(--color-text-secondary); 
-            transition: color 0.3s;
-            position: relative;
-        }
-        .chat-tab.active {
-            color: var(--bg-tab-active);
-        }
-        .chat-tab.active::after {
-            content: '';
-            position: absolute;
-            bottom: -11px;
-            left: 0;
+        .app-container {
             width: 100%;
-            height: 3px;
-            background: var(--bg-tab-active);
-            border-radius: 5px;
-        }
-
-        /* Область сообщений */
-        #messages {
-            flex-grow: 1;
-            padding: 20px;
-            overflow-y: auto;
-            background-color: var(--bg-messages); 
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-            transition: background-color 0.5s;
-        }
-        /* Стили скроллбара */
-        #messages::-webkit-scrollbar { width: 8px; }
-        #messages::-webkit-scrollbar-track { background: var(--bg-messages); }
-        #messages::-webkit-scrollbar-thumb { background: var(--color-text-secondary); border-radius: 10px; }
-
-        /* Отдельное сообщение */
-        .message-box { max-width: 85%; position: relative; display: flex; align-items: flex-end;}
-        .message-box.mine { margin-left: auto; flex-direction: row-reverse; }
-        .message-box.other { margin-right: auto; }
-
-        .message-avatar {
-             width: 35px;
-            height: 35px;
-            border-radius: 50%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            color: white;
-            font-size: 0.9em;
-            font-weight: bold;
-            flex-shrink: 0; 
-            margin: 0 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .message-box.mine .message-avatar { background: linear-gradient(45deg, #1de9b6, #00b0ff); }
-        .message-box.other .message-avatar { background: linear-gradient(45deg, #ff9800, #ffc107); }
-        .message-nick { color: var(--color-text-secondary); font-size: 0.78em; margin-bottom: 3px; font-weight: 600;}
-
-        .message-text {
-            padding: 12px 18px;
+            max-width: 400px;
+            height: 100vh;
+            max-height: 800px; /* Max height for mobile feel */
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            background: #161b22; /* Slightly lighter dark background for the app */
             border-radius: 20px;
-            line-height: 1.5;
-            word-wrap: break-word;
-            font-size: 1.0em;
-            position: relative;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-            transition: transform 0.2s ease-out, background-color 0.5s, color 0.5s;
-        }
-        .message-box.mine .message-text {
-            background: var(--bg-message-mine);
-            color: var(--color-message-mine);
-            border-bottom-right-radius: 5px;
-            padding-right: 45px; /* Место для времени */
-        }
-        .message-box.other .message-text {
-            background-color: var(--bg-message-other);
-            color: var(--color-message-other);
-            border-bottom-left-radius: 5px;
-            padding-right: 45px; /* Место для времени */
-        }
-        
-        .message-time {
-            position: absolute;
-            bottom: 5px;
-            right: 15px;
-            font-size: 0.7em;
-            opacity: 0.7;
-            /* Цвет времени меняется в зависимости от темы/сообщения */
-            color: var(--color-message-mine); 
-        }
-        .message-box.other .message-time {
-            color: var(--color-message-other); 
-        }
-        
-        /* Область ввода */
-        .input-area {
-            display: flex;
-            padding: 15px 20px;
-            border-top: 1px solid var(--border-input);
-            background-color: var(--bg-input-container); 
-            align-items: center;
-            gap: 10px;
-            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
-            transition: background-color 0.5s;
-        }
-        #message-input {
-            flex-grow: 1;
-            padding: 12px 18px;
-            border: 1px solid var(--border-input);
-            border-radius: 25px;
-            font-size: 1.05em;
-            outline: none;
-            transition: all 0.3s ease;
-            background-color: var(--bg-input); 
-            color: var(--color-text-primary); 
-        }
-        #message-input:focus {
-            border-color: #007bff;
-            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.25);
-            background-color: var(--bg-container);
-        }
-        #message-input::placeholder {
-            color: var(--color-text-secondary); 
-            opacity: 0.8;
-        }
-        
-        #send-button {
-            background: linear-gradient(45deg, #28a745, #20c997);
-            color: white;
-            border: none;
-            padding: 12px 20px;
-            border-radius: 25px;
-            cursor: pointer;
-            font-weight: bold;
-            font-size: 1.05em;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
-        }
-        
-        /* Анимация спиннера */
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .spinner {
-            animation: spin 1s linear infinite;
-        }
-        
-        /* == Модальное окно Аутентификации (без изменений) == */
-        #auth-prompt {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background-color: rgba(0, 0, 0, 0.85); 
-            backdrop-filter: blur(8px); 
-            display: none; 
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
-            transition: opacity 0.4s ease-out;
-            color: var(--color-text-primary);
-        }
-        .auth-box {
-            background: var(--auth-box-bg); 
-            padding: 40px 50px;
-            border-radius: 20px; 
-            text-align: center;
-            width: 350px;
-            box-shadow: var(--shadow-primary);
-            transition: background-color 0.5s, color 0.5s;
-        }
-        
-        .auth-box h3 {
-            font-size: 2em;
-            margin-bottom: 20px;
-            background: linear-gradient(45deg, #8A2387, #E94057, #F27121);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            font-weight: 800;
-        }
-        .auth-input-group {
-            margin-bottom: 15px;
-            text-align: left;
-        }
-        .auth-input-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 600;
-            font-size: 0.9em;
-        }
-        .auth-input-group input {
-            width: 100%;
-            padding: 15px 20px;
-            box-sizing: border-box;
-            border: 2px solid var(--border-input);
-            border-radius: 12px; 
-            font-size: 1em;
-            background-color: var(--bg-input); 
-            color: var(--color-text-primary);
-            transition: all 0.3s;
-        }
-        .auth-input-group input:focus {
-            border-color: var(--bg-tab-active);
-            box-shadow: 0 0 10px rgba(233, 64, 87, 0.2);
-            outline: none;
-        }
-        
-        #auth-error-message {
-            display: none;
-            background-color: rgba(220, 53, 69, 0.1);
-            color: var(--color-error);
-            border: 1px solid var(--color-error);
-            padding: 10px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-            font-size: 0.9em;
-            text-align: center;
-        }
-
-        #auth-button {
-            width: 100%;
-            padding: 15px 20px;
-            margin-top: 15px;
-            background: var(--auth-button-gradient);
-            color: white;
-            border: none;
-            font-weight: bold;
-            cursor: pointer;
-            font-size: 1.1em;
-            border-radius: 12px;
-            box-shadow: 0 8px 15px rgba(0, 123, 255, 0.3);
-            transition: all 0.3s;
-        }
-        #auth-button:hover {
-            opacity: 0.9;
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(0, 123, 255, 0.4);
-        }
-        #toggle-auth-mode {
-            background: none;
-            border: none;
-            color: var(--bg-tab-active);
-            margin-top: 15px;
-            cursor: pointer;
-            font-size: 0.9em;
-            text-decoration: underline;
-        }
-
-        /* Loading Overlay (без изменений) */
-        #loading-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background-color: rgba(0, 0, 0, 0.8); 
             display: flex;
             flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            color: white;
-            font-size: 1.2em;
-            z-index: 1001;
-            transition: opacity 0.4s ease-out;
+            overflow: hidden;
+            position: relative;
         }
-        #loading-spinner {
+        .header-bg {
+            background: linear-gradient(135deg, #a020f0, #ff4081); /* Gradient for the header */
+            height: 120px;
+            border-top-left-radius: 20px;
+            border-top-right-radius: 20px;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+        }
+        /* Custom spinner for the loading screen */
+        .loader {
             border: 4px solid rgba(255, 255, 255, 0.3);
-            border-top: 4px solid #E94057;
+            border-top: 4px solid #ff4081; /* Pink */
             border-radius: 50%;
             width: 40px;
             height: 40px;
             animation: spin 1s linear infinite;
-            margin-bottom: 20px;
         }
-        
-        /* == Секция Профиля == */
-        #profile-overlay {
-            position: fixed;
-            top: 0; right: 0;
-            width: 480px; 
-            height: 100vh;
-            background-color: var(--bg-container); 
-            display: none; 
-            flex-direction: column;
-            box-shadow: var(--shadow-primary);
-            z-index: 999;
-            transition: transform 0.3s ease-out;
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
-        .profile-header {
-            background: linear-gradient(45deg, #8A2387, #E94057, #F27121);
-            color: white;
-            padding: 15px 25px;
+        .chat-input-container {
+            border-top: 1px solid #21262d;
+            padding: 1rem;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            background-color: #161b22;
         }
-        .profile-header button {
-            background: none;
-            border: none;
+        .message-bubble {
+            max-width: 80%;
+            padding: 8px 12px;
+            border-radius: 18px;
+            margin-bottom: 8px;
+            word-wrap: break-word;
+        }
+        .my-message {
+            background-color: #8c20f0; /* Purple gradient part */
             color: white;
-            font-size: 1.5em;
-            cursor: pointer;
+            margin-left: auto;
+            border-bottom-right-radius: 2px;
         }
-        
-        .profile-content {
-            padding: 20px 25px;
-            overflow-y: auto;
+        .other-message {
+            background-color: #21262d; /* Dark gray for others */
+            color: #c9d1d9;
+            margin-right: auto;
+            border-bottom-left-radius: 2px;
+        }
+        .chat-messages {
             flex-grow: 1;
-        }
-        .profile-avatar-area {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .profile-main-avatar {
-            width: 100px;
-            height: 100px;
-            border-radius: 50%;
-            background: linear-gradient(45deg, #1de9b6, #00b0ff);
-            display: inline-flex;
-            justify-content: center;
-            align-items: center;
-            color: white;
-            font-size: 3em;
-            font-weight: bold;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-            position: relative;
-        }
-        .profile-name {
-            font-size: 1.8em;
-            font-weight: bold;
-            margin-top: 10px;
-        }
-        .profile-status {
-            font-size: 0.9em;
-            color: var(--color-text-secondary);
-        }
-
-        .profile-section {
-            background-color: var(--bg-profile);
-            border: 1px solid var(--border-profile);
-            border-radius: 15px;
-            padding: 15px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
-        }
-        .profile-section-title {
-            font-size: 0.9em;
-            color: var(--color-text-secondary);
-            margin-bottom: 5px;
-            font-weight: 600;
-        }
-        .profile-info-row {
+            overflow-y: auto;
+            padding: 1rem;
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px 0;
-            border-bottom: 1px solid var(--border-profile);
+            flex-direction: column-reverse; /* New messages at the bottom */
         }
-        .profile-info-row:last-child { border-bottom: none; }
-
-        .profile-info-label {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-weight: 500;
+        /* Style for the Send button icon (SVG) */
+        .send-icon {
+            fill: #ff4081; /* Pink color for the icon */
+            transition: fill 0.2s;
         }
-        .profile-info-value {
-            font-weight: bold;
-            color: var(--color-text-primary);
-        }
-        
-        .about-me-text {
-            white-space: pre-wrap;
-        }
-        .about-me-edit-area {
-            display: none; /* Скрыто по умолчанию */
-        }
-        .about-me-edit-area textarea {
-            width: 100%;
-            height: 100px;
-            padding: 10px;
-            border: 1px solid var(--border-input);
-            border-radius: 8px;
-            resize: none;
-            box-sizing: border-box;
-            background-color: var(--bg-input);
-            color: var(--color-text-primary);
-        }
-        #edit-about-btn {
-            background: var(--auth-button-gradient);
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: 10px;
-            cursor: pointer;
-            font-weight: 500;
-            font-size: 0.9em;
-            margin-top: 10px;
-            display: block;
-            width: 100%;
-        }
-
-
-        /* Адаптивный дизайн */
-        @media (max-width: 600px) {
-            .chat-container { width: 100%; height: 100vh; border-radius: 0; box-shadow: none; animation: none; opacity: 1; transform: scale(1); }
-            body { align-items: flex-start; }
-            .header { padding: 15px 20px; }
-            .input-area { padding: 10px 15px; }
-            .auth-box { width: 90%; margin: 20px; padding: 30px; }
-            #profile-overlay { width: 100%; }
+        .send-icon:hover {
+            fill: #a020f0; /* Purple on hover */
         }
     </style>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, orderBy, limit, serverTimestamp, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // setLogLevel('debug'); // Активировать для отладки
+
+        // Глобальные переменные, предоставленные Canvas
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Переменные Firebase
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // Состояние приложения
+        let userNickname = localStorage.getItem('userNickname') || '';
+        const CURRENT_CHAT_ID = 'general'; // Всегда используем один общий чат
+        const PROFILE_DOC_PATH = (uid) => `artifacts/${appId}/users/${uid}/profiles/myProfile`;
+        const CHAT_COLLECTION_PATH = `artifacts/${appId}/public/data/chats/${CURRENT_CHAT_ID}/messages`;
+        
+        const views = {
+            loading: document.getElementById('loading-view'),
+            nickname: document.getElementById('nickname-view'),
+            chat: document.getElementById('chat-view'),
+        };
+        const nicknameInput = document.getElementById('nickname-input');
+        const chatMessagesDiv = document.getElementById('chat-messages');
+
+        // --- Утилиты ---
+        
+        function showView(viewName) {
+            Object.values(views).forEach(view => {
+                if (view) view.classList.add('hidden');
+            });
+            if (views[viewName]) {
+                views[viewName].classList.remove('hidden');
+            }
+        }
+
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return '...';
+            const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+            return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        // --- Главная логика Firebase ---
+
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase config is missing.");
+                return;
+            }
+
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Слушатель состояния аутентификации
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated. UID:", userId);
+                        // Проверяем, есть ли у пользователя никнейм
+                        await loadUserProfile();
+                        // Устанавливаем готовность только после загрузки профиля
+                        isAuthReady = true;
+                        if (userNickname) {
+                            showView('chat');
+                            startMessageListener();
+                        } else {
+                            showView('nickname');
+                        }
+                    } else {
+                        // Если пользователь не аутентифицирован, но токен есть, попробуем войти
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            // Иначе - анонимный вход
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization or Auth Error:", error);
+                // Показываем заглушку с ошибкой, если не удалось подключиться
+                views.loading.innerHTML = `<div class="text-white text-center p-8">Ошибка подключения. Пожалуйста, проверьте консоль.</div>`;
+            }
+        }
+        
+        async function loadUserProfile() {
+            if (!userId) return;
+            try {
+                const profileRef = doc(db, PROFILE_DOC_PATH(userId));
+                const profileSnap = await getDoc(profileRef);
+                
+                if (profileSnap.exists() && profileSnap.data().nickname) {
+                    userNickname = profileSnap.data().nickname;
+                    localStorage.setItem('userNickname', userNickname);
+                    document.getElementById('current-nickname-display').textContent = userNickname;
+                    console.log("Profile loaded:", userNickname);
+                } else {
+                    // Если локально был ник, но в БД нет (например, новый аккаунт), очищаем локальный
+                    if (userNickname) {
+                        userNickname = '';
+                        localStorage.removeItem('userNickname');
+                    }
+                    console.log("Profile not found. Prompting for nickname.");
+                }
+
+            } catch (e) {
+                console.error("Error loading user profile:", e);
+                // На случай ошибки, сбрасываем никнейм и просим ввести заново
+                userNickname = '';
+                localStorage.removeItem('userNickname');
+            }
+        }
+
+        async function saveNickname(nickname) {
+            if (!userId || !db) return;
+            const trimmedNickname = nickname.trim();
+            if (trimmedNickname.length < 2 || trimmedNickname.length > 20) {
+                alertModal("Никнейм должен быть от 2 до 20 символов.");
+                return;
+            }
+
+            try {
+                const profileRef = doc(db, PROFILE_DOC_PATH(userId));
+                await setDoc(profileRef, {
+                    nickname: trimmedNickname,
+                    createdAt: serverTimestamp(),
+                    userId: userId 
+                }, { merge: true });
+
+                userNickname = trimmedNickname;
+                localStorage.setItem('userNickname', userNickname);
+                document.getElementById('current-nickname-display').textContent = userNickname;
+
+                showView('chat');
+                startMessageListener(); // Запускаем слушатель после успешного сохранения
+            } catch (e) {
+                console.error("Error saving nickname:", e);
+                alertModal("Не удалось сохранить никнейм. Попробуйте еще раз.");
+            }
+        }
+
+        // --- Логика Чата ---
+
+        function startMessageListener() {
+            if (!db || !isAuthReady) return;
+
+            const messagesCollectionRef = collection(db, CHAT_COLLECTION_PATH);
+            const q = query(messagesCollectionRef, orderBy('createdAt', 'desc'), limit(50));
+
+            onSnapshot(q, (snapshot) => {
+                const messages = [];
+                snapshot.forEach(doc => {
+                    messages.push({ id: doc.id, ...doc.data() });
+                });
+                renderMessages(messages);
+            }, (error) => {
+                console.error("Error listening to messages:", error);
+                alertModal("Ошибка загрузки сообщений. Пожалуйста, проверьте ваше подключение.");
+            });
+        }
+
+        function renderMessages(messages) {
+            chatMessagesDiv.innerHTML = ''; // Очистка
+            
+            // Сообщения приходят в обратном порядке (latest first), отображаем их снизу вверх
+            messages.reverse().forEach(msg => {
+                const isMine = msg.userId === userId;
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `flex ${isMine ? 'justify-end' : 'justify-start'}`;
+
+                const nicknameElement = document.createElement('div');
+                nicknameElement.className = `text-xs ${isMine ? 'text-gray-400 text-right' : 'text-purple-400 text-left'} mb-1`;
+                nicknameElement.textContent = msg.nickname || 'Неизвестный';
+                
+                const bubble = document.createElement('div');
+                bubble.className = `message-bubble ${isMine ? 'my-message' : 'other-message'}`;
+                
+                const textElement = document.createElement('div');
+                textElement.textContent = msg.text;
+                textElement.className = 'text-sm';
+
+                const timeElement = document.createElement('div');
+                timeElement.className = `text-xs mt-1 ${isMine ? 'text-gray-200' : 'text-gray-400'} opacity-75 text-right`;
+                timeElement.textContent = formatTimestamp(msg.createdAt);
+
+                bubble.appendChild(textElement);
+                bubble.appendChild(timeElement);
+
+                const container = document.createElement('div');
+                container.appendChild(nicknameElement);
+                container.appendChild(bubble);
+
+                messageDiv.appendChild(container);
+                chatMessagesDiv.appendChild(messageDiv);
+            });
+            
+            // Прокрутка вниз при первом рендере или отправке своего сообщения
+            // Если вы используете flex-direction: column-reverse, прокрутка не нужна
+            // chatMessagesDiv.scrollTop = chatMessagesDiv.scrollHeight;
+        }
+
+        async function sendMessage(text) {
+            if (!db || !userId || !userNickname || !text.trim()) return;
+
+            const messagesCollectionRef = collection(db, CHAT_COLLECTION_PATH);
+            const message = {
+                text: text.trim(),
+                createdAt: serverTimestamp(),
+                userId: userId,
+                nickname: userNickname
+            };
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    // Просто добавляем новое сообщение
+                    const newDocRef = doc(messagesCollectionRef); 
+                    transaction.set(newDocRef, message);
+                });
+                document.getElementById('message-input').value = ''; // Очистка
+            } catch (e) {
+                console.error("Error sending message:", e);
+                alertModal("Не удалось отправить сообщение.");
+            }
+        }
+        
+        // --- Модальное окно (замена alert()) ---
+
+        function alertModal(message) {
+            const modal = document.getElementById('custom-alert-modal');
+            const messageEl = document.getElementById('alert-message');
+            messageEl.textContent = message;
+            modal.classList.remove('hidden');
+        }
+
+        // --- Инициализация и обработчики событий ---
+
+        window.onload = initializeFirebase;
+
+        // Обработчик сохранения никнейма
+        document.getElementById('start-chat-button').addEventListener('click', () => {
+            saveNickname(nicknameInput.value);
+        });
+        nicknameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                saveNickname(nicknameInput.value);
+            }
+        });
+
+        // Обработчик отправки сообщения
+        document.getElementById('send-message-button').addEventListener('click', () => {
+            const input = document.getElementById('message-input');
+            sendMessage(input.value);
+        });
+        document.getElementById('message-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                const input = document.getElementById('message-input');
+                sendMessage(input.value);
+            }
+        });
+
+        // Обработчик закрытия модального окна
+        document.getElementById('close-alert-button').addEventListener('click', () => {
+            document.getElementById('custom-alert-modal').classList.add('hidden');
+        });
+        
+        // Обработчик сброса профиля
+        document.getElementById('reset-profile-button').addEventListener('click', async () => {
+            if(confirm("Вы уверены, что хотите выйти? Вам придется заново вводить никнейм.")) {
+                localStorage.removeItem('userNickname');
+                userNickname = '';
+                userId = null;
+                showView('loading');
+                await signOut(auth);
+                // Перезапускаем инициализацию, чтобы снова войти анонимно
+                // В onAuthStateChanged сработает signInAnonymously
+            } else {
+                // Используем alertModal как замену confirm
+                alertModal("Выход отменен.");
+            }
+        });
+        
+        // Замена confirm на модальное окно (так как confirm() запрещен)
+        function confirm(message) {
+             const confirmModal = document.getElementById('custom-confirm-modal');
+             const confirmMessageEl = document.getElementById('confirm-message');
+             const confirmYesBtn = document.getElementById('confirm-yes-button');
+             const confirmNoBtn = document.getElementById('confirm-no-button');
+
+             confirmMessageEl.textContent = message;
+             confirmModal.classList.remove('hidden');
+
+             return new Promise(resolve => {
+                 confirmYesBtn.onclick = () => {
+                     confirmModal.classList.add('hidden');
+                     resolve(true);
+                 };
+                 confirmNoBtn.onclick = () => {
+                     confirmModal.classList.add('hidden');
+                     resolve(false);
+                 };
+             });
+         }
+        
+    </script>
 </head>
-<body class="light-theme">
+<body>
 
-<div id="loading-overlay">
-    <div id="loading-spinner"></div>
-    <div id="loading-text">Подключение к SecretGram...</div>
-</div>
-
-
-<div id="auth-prompt">
-    <div class="auth-box">
-        <h3 id="auth-title">Вход в SecretGram</h3>
+    <div class="app-container">
         
-        <div id="auth-error-message"></div>
+        <div class="header-bg"></div>
 
-        <div class="auth-input-group" id="auth-nick-group" style="display: none;">
-            <label for="auth-nick">Ник (будет виден всем)</label>
-            <input type="text" id="auth-nick" placeholder="Введите ваш ник..." maxlength="20">
-        </div>
-        
-        <div class="auth-input-group">
-            <label for="auth-email">Имя пользователя (только буквы/цифры)</label>
-            <input type="text" id="auth-email" placeholder="Введите имя пользователя">
-        </div>
-
-        <div class="auth-input-group">
-            <label for="auth-password">Пароль (мин. 6 символов)</label>
-            <input type="password" id="auth-password" placeholder="Введите пароль">
-        </div>
-        
-        <button id="auth-button">Войти</button>
-        <button id="toggle-auth-mode">Нет аккаунта? Регистрация</button>
-    </div>
-</div>
-
-<div id="profile-overlay">
-    <div class="profile-header">
-        <button id="close-profile-btn"><i class="fas fa-arrow-left"></i></button>
-        <div style="font-size: 1.2em;">Информация</div>
-        <button style="visibility: hidden;"><i class="fas fa-times"></i></button>
-    </div>
-    
-    <div class="profile-content">
-        <div class="profile-avatar-area">
-            <div class="profile-main-avatar" id="profile-avatar-initial">?</div>
-            <div class="profile-name" id="profile-nick">Гость</div>
-            <div class="profile-status">был(а) 4 часа назад (имитация)</div>
-        </div>
-        
-        <div class="profile-section">
-            <div class="profile-section-title">О себе</div>
-            <div id="profile-about-text" class="about-me-text">
-                Любые подробности, например: возраст, род занятий или город.
+        <!-- Модальное окно для Alert (замена alert()) -->
+        <div id="custom-alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center p-4">
+            <div class="bg-[#161b22] p-6 rounded-xl shadow-2xl w-full max-w-sm text-white">
+                <p id="alert-message" class="mb-4 text-center text-sm"></p>
+                <button id="close-alert-button" class="w-full py-2 bg-[#ff4081] hover:bg-[#a020f0] rounded-lg font-semibold transition">ОК</button>
             </div>
-            <div id="profile-about-edit" class="about-me-edit-area">
-                <textarea id="profile-about-input" maxlength="200"></textarea>
-            </div>
-            <button id="edit-about-btn"><i class="fas fa-edit"></i> Изменить</button>
         </div>
         
-        <div class="profile-section">
-            <div class="profile-info-row">
-                <div class="profile-info-label"><i class="fas fa-user"></i> Ник</div>
-                <div class="profile-info-value" id="profile-nick-info"></div>
-            </div>
-            <div class="profile-info-row">
-                <div class="profile-info-label"><i class="fas fa-at"></i> Пользователь</div>
-                <div class="profile-info-value" id="profile-id">@user_id_0000</div>
-            </div>
-             <div class="profile-info-row" style="color: var(--color-text-secondary);">
-                <div class="profile-info-label"><i class="fas fa-phone-alt"></i> Номер телефона</div>
-                <div class="profile-info-value">+370 664 14501 (нет в демо)</div>
+        <!-- Модальное окно для Confirm (замена confirm()) -->
+        <div id="custom-confirm-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center p-4">
+            <div class="bg-[#161b22] p-6 rounded-xl shadow-2xl w-full max-w-sm text-white">
+                <p id="confirm-message" class="mb-4 text-center text-sm"></p>
+                <div class="flex justify-between space-x-4">
+                    <button id="confirm-no-button" class="w-1/2 py-2 border border-gray-600 text-gray-400 hover:bg-gray-800 rounded-lg transition">Отмена</button>
+                    <button id="confirm-yes-button" class="w-1/2 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition">Да, выйти</button>
+                </div>
             </div>
         </div>
 
-        <div class="profile-section" style="text-align: center;">
-            <button id="logout-button" style="background: var(--color-error); color: white; border: none; padding: 10px 20px; border-radius: 10px; cursor: pointer; font-weight: bold;"><i class="fas fa-sign-out-alt"></i> Выйти из SecretGram</button>
+        <!-- 1. Экран загрузки (Loading View) -->
+        <div id="loading-view" class="absolute inset-0 bg-[#0d1117] flex flex-col items-center justify-center z-40 transition-opacity duration-300">
+            <div class="loader mb-4"></div>
+            <p class="text-white text-lg">Подключение к SecretGram...</p>
+        </div>
+
+        <!-- 2. Экран ввода никнейма (Nickname View) -->
+        <div id="nickname-view" class="hidden absolute inset-0 bg-[#0d1117] flex flex-col items-center justify-center z-30 p-8">
+            <svg class="mb-6 w-16 h-16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ff4081" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87m-4-12a4 4 0 0 1 0 7.75"></path></svg>
+            <h2 class="text-white text-2xl font-bold mb-8">Добро пожаловать</h2>
+            <p class="text-gray-400 text-center mb-6">Ваш ник будет виден всем в чате.</p>
+            <div class="w-full flex space-x-2">
+                <input id="nickname-input" type="text" placeholder="Введите ваш ник..." class="flex-grow p-3 rounded-xl bg-[#21262d] text-white border border-[#21262d] focus:border-[#a020f0] focus:outline-none transition" maxlength="20">
+                <button id="start-chat-button" class="p-3 bg-gradient-to-r from-[#a020f0] to-[#ff4081] text-white rounded-xl font-semibold shadow-lg hover:shadow-[#ff4081]/50 transition">
+                    Начать чат
+                </button>
+            </div>
+        </div>
+
+        <!-- 3. Экран Чата (Chat View) -->
+        <div id="chat-view" class="hidden flex-grow flex flex-col">
+            
+            <!-- Header -->
+            <header class="p-4 relative z-10 flex justify-between items-center text-white">
+                <h1 class="text-xl font-bold">SecretGram</h1>
+                <div class="flex items-center space-x-2">
+                    <span id="current-nickname-display" class="text-sm font-semibold text-gray-300"></span>
+                    <button id="reset-profile-button" title="Выйти и сбросить профиль" class="p-1 rounded-full text-gray-400 hover:text-[#ff4081] transition">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Tabs -->
+            <div class="relative z-10 flex text-center text-white border-b border-[#21262d]">
+                <div class="w-1/2 p-3 font-semibold border-b-2 border-[#ff4081] text-[#ff4081] cursor-pointer">
+                    Общий
+                </div>
+                <div class="w-1/2 p-3 text-gray-400 cursor-default">
+                    Секретный
+                </div>
+            </div>
+
+            <!-- Messages Area -->
+            <div id="chat-messages" class="chat-messages">
+                <!-- Сообщения будут рендериться здесь -->
+            </div>
+
+            <!-- Input Area -->
+            <div class="chat-input-container">
+                <input id="message-input" type="text" placeholder="Написать сообщение..." class="flex-grow p-3 rounded-xl bg-[#21262d] text-white border border-[#21262d] focus:border-[#a020f0] focus:outline-none transition">
+                <button id="send-message-button" class="ml-2 p-3 rounded-full bg-transparent hover:bg-[#21262d] transition">
+                    <!-- Send Icon (SVG) -->
+                    <svg class="send-icon w-6 h-6 transform rotate-45 -mt-1" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M2.01 21.01L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                </button>
+            </div>
         </div>
     </div>
-</div>
-
-
-<div class="chat-container">
-    <div class="header">
-        <div class="app-name">SecretGram</div>
-        <div class="controls">
-            <button id="theme-toggle" title="Сменить тему">
-                <i class="fas fa-moon"></i>
-                <i class="fas fa-sun"></i>
-            </button>
-            <button id="settings-button" title="Профиль и Настройки">
-                <i class="fas fa-cog"></i> 
-            </button>
-        </div>
-    </div>
-
-    <div class="chat-navigation">
-        <div class="chat-tab active" data-chat-id="general" id="tab-general">
-            <i class="fas fa-users"></i> Общий
-        </div>
-        <div class="chat-tab" data-chat-id="secret" id="tab-secret">
-            <i class="fas fa-lock"></i> Секретный
-        </div>
-        </div>
-    
-    <div class="chat-active-header" id="chat-active-name">Общий чат</div>
-
-    <div id="messages">
-        </div>
-    <div class="input-area">
-        <input type="text" id="message-input" placeholder="Написать сообщение..." required>
-        <button id="send-button"><i class="fas fa-paper-plane"></i></button>
-    </div>
-</div>
-
+    <div class="fixed bottom-0 text-xs text-gray-600 p-1">:: Powered by ThisTeam ::</div>
 </body>
 </html>
