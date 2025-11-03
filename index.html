@@ -26,8 +26,6 @@
         // Определяем, какую конфигурацию использовать
         let firebaseConfig = userProvidedConfig;
         
-        // Если среда предоставляет свою конфигурацию (более приоритетно для Canvas), используем ее, 
-        // но только если она не пуста, чтобы избежать ошибок.
         if (typeof __firebase_config !== 'undefined' && __firebase_config) {
             try {
                 const parsedConfig = JSON.parse(__firebase_config);
@@ -44,7 +42,7 @@
         // Импорты Firebase (v9 modules)
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, onSnapshot, collection, query, addDoc, getDoc, setDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, onSnapshot, collection, query, addDoc, getDoc, setDoc, serverTimestamp, setLogLevel, updateDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // Глобальные переменные Firebase
         let app, auth, db;
@@ -53,6 +51,7 @@
         let chatListener = null;
         let currentChatId = 'general';
         let audioContext = null;
+        let privateChats = {}; // {chatId: {partnerId, partnerNick}}
 
         // == ИНИЦИАЛИЗАЦИЯ FIREBASE ==
         try {
@@ -67,50 +66,67 @@
         }
 
         /**
-         * Скрывает экран загрузки и показывает либо чат, либо форму аутентификации.
+         * Управление видимостью оверлеев.
          */
-        function hideLoadingOverlay() {
+        function hideAllOverlays() {
             document.getElementById('loading-overlay').style.display = 'none';
+            document.getElementById('auth-prompt').style.display = 'none';
+            document.getElementById('profile-overlay').style.display = 'none';
+            document.querySelector('.chat-container').style.display = 'flex';
         }
+
+        function showLoadingOverlay() {
+            document.getElementById('loading-overlay').style.display = 'flex';
+        }
+
+        function showAuthPrompt() {
+            document.getElementById('auth-prompt').style.display = 'flex';
+            document.querySelector('.chat-container').style.display = 'none';
+        }
+        
+        function toggleProfileOverlay(show) {
+            const overlay = document.getElementById('profile-overlay');
+            if (show) {
+                overlay.style.display = 'flex';
+                document.querySelector('.chat-container').style.display = 'none';
+                loadProfileData(); 
+            } else {
+                overlay.style.display = 'none';
+                document.querySelector('.chat-container').style.display = 'flex';
+            }
+        }
+        
+        // Привязываем функцию закрытия профиля к кнопке
+        document.getElementById('close-profile-btn').addEventListener('click', () => toggleProfileOverlay(false));
+        document.getElementById('settings-button').addEventListener('click', () => toggleProfileOverlay(true));
+
 
         /**
          * Устанавливает слушатель изменений состояния аутентификации.
          */
         function setupAuthStateListener() {
             onAuthStateChanged(auth, async (user) => {
-                const chatContainer = document.querySelector('.chat-container');
-                const authPrompt = document.getElementById('auth-prompt');
-
                 if (user) {
                     currentUserId = user.uid;
-                    // Показываем полный ID для обеспечения совместной работы
-                    document.getElementById('current-user-id').textContent = currentUserId; 
-                    
                     await fetchUserProfile(user.uid); 
                     
-                    authPrompt.style.display = 'none';
-                    chatContainer.style.display = 'flex';
-                    
+                    hideAllOverlays();
+                    loadProfileData(); // Загружаем данные в память для отображения
                     loadChat(currentChatId);
-
-                    document.getElementById('current-nick').textContent = userNick || "Гость";
-
+                    // loadPrivateChats(); // Загружаем личные чаты (реализуем позже)
                 } else {
                     currentUserId = null;
                     userNick = null;
-                    chatContainer.style.display = 'none';
-                    // Если пользователь не вошел, показываем форму аутентификации
-                    document.getElementById('auth-prompt').style.display = 'flex'; 
+                    showAuthPrompt();
                     if (chatListener) {
                         chatListener(); 
                         chatListener = null;
                     }
                     document.getElementById('messages').innerHTML = '';
-                    clearAuthError(); // Очищаем ошибки при выходе
+                    clearAuthError(); 
                 }
                 
-                // Скрываем спиннер загрузки только после первой проверки состояния
-                hideLoadingOverlay();
+                showLoadingOverlay().style.display = 'none';
             });
         }
         
@@ -120,61 +136,123 @@
         async function runAuthentication() {
              if (!auth) return;
              
-             // 1. Попытка входа с токеном Canvas (более высокий приоритет)
+             // ... (логика входа с токеном Canvas и таймаутом анонимного входа, как в предыдущем коде) ...
              if (initialAuthToken) {
                  try {
-                     console.log("Попытка входа с токеном Canvas...");
                      await signInWithCustomToken(auth, initialAuthToken);
-                     console.log("Вход с токеном Canvas успешен.");
                      return; 
                  } catch (error) {
                      console.error("Ошибка авторизации с токеном Canvas. Переход к анонимному входу:", error);
                  }
              }
 
-             // 2. Попытка анонимного входа с таймаутом
              const AUTH_TIMEOUT_MS = 3000;
              const timeoutPromise = new Promise((_, reject) => {
                  setTimeout(() => reject(new Error('Auth Timeout')), AUTH_TIMEOUT_MS);
              });
              
              try {
-                 console.log("Попытка анонимного входа...");
                  await Promise.race([
                      signInAnonymously(auth),
                      timeoutPromise
                  ]);
-                 console.log("Анонимный вход успешен.");
              } catch (error) {
-                 if (error.message === 'Auth Timeout') {
-                     console.warn("Таймаут аутентификации (3с). Дальнейшая аутентификация будет обрабатываться onAuthStateChanged.");
-                 } else {
+                 if (error.message !== 'Auth Timeout') {
                      console.error("Критическая ошибка анонимного входа:", error);
                  }
              }
          }
 
         /**
-         * Получает профиль пользователя (ник) из Firestore.
+         * Получает профиль пользователя (ник, о себе) из Firestore.
          */
         async function fetchUserProfile(uid) {
             const profileRef = doc(db, `artifacts/${appId}/users/${uid}/profiles/myProfile`);
             try {
                 const profileSnap = await getDoc(profileRef);
                 if (profileSnap.exists()) {
-                    userNick = profileSnap.data().nick;
+                    const data = profileSnap.data();
+                    userNick = data.nick;
+                    window.currentUserAbout = data.about || 'Любые подробности, например: возраст, род занятий или город.';
                 } else {
                     userNick = `User-${uid.substring(0, 4)}`;
-                    // Впервые вошедшему анонимно пользователю сохраним ник
-                    await setDoc(profileRef, { nick: userNick, createdAt: serverTimestamp() }, { merge: true });
+                    window.currentUserAbout = 'Любые подробности, например: возраст, род занятий или город.';
+                    await setDoc(profileRef, { nick: userNick, about: window.currentUserAbout, createdAt: serverTimestamp() }, { merge: true });
                 }
             } catch (error) {
                 console.error("Ошибка получения профиля:", error);
                 userNick = `User-${uid.substring(0, 4)}`;
+                window.currentUserAbout = 'Любые подробности, например: возраст, род занятий или город.';
             }
         }
+        
+        /**
+         * Загружает данные профиля в UI секции "Профиль".
+         */
+        function loadProfileData() {
+            if (!currentUserId) return;
+            
+            document.getElementById('profile-nick').textContent = userNick || "Гость";
+            document.getElementById('profile-id').textContent = `@${currentUserId.substring(0, 8)}`; // Вместо номера телефона, показываем ID
+            document.getElementById('profile-about-text').textContent = window.currentUserAbout;
+            document.getElementById('profile-avatar-initial').textContent = userNick ? userNick.charAt(0).toUpperCase() : '?';
+        }
+        
+        /**
+         * Сохраняет отредактированный текст "О себе".
+         */
+        async function saveAboutMe() {
+             if (!currentUserId) return;
+             const newAbout = document.getElementById('profile-about-input').value.trim();
+             if (newAbout.length > 200) {
+                 alert('Текст "О себе" не должен превышать 200 символов.');
+                 return;
+             }
+             
+             try {
+                 const profileRef = doc(db, `artifacts/${appId}/users/${currentUserId}/profiles/myProfile`);
+                 await updateDoc(profileRef, { about: newAbout });
+                 window.currentUserAbout = newAbout;
+                 document.getElementById('profile-about-text').textContent = newAbout;
+                 
+                 // Скрываем форму редактирования и показываем текст
+                 document.getElementById('profile-about-text').style.display = 'block';
+                 document.getElementById('profile-about-edit').style.display = 'none';
+                 document.getElementById('edit-about-btn').innerHTML = '<i class="fas fa-edit"></i> Изменить';
+                 
+                 console.log("Профиль обновлен.");
+             } catch (error) {
+                 console.error("Ошибка сохранения профиля:", error);
+                 alert('Не удалось сохранить изменения. Проверьте правила Firestore.');
+             }
+        }
+        
+        /**
+         * Переключает режим редактирования "О себе".
+         */
+        function toggleAboutEdit() {
+            const textEl = document.getElementById('profile-about-text');
+            const editEl = document.getElementById('profile-about-edit');
+            const btn = document.getElementById('edit-about-btn');
+            
+            if (editEl.style.display === 'none' || editEl.style.display === '') {
+                // Включаем редактирование
+                editEl.style.display = 'block';
+                textEl.style.display = 'none';
+                document.getElementById('profile-about-input').value = window.currentUserAbout;
+                btn.innerHTML = '<i class="fas fa-check"></i> Сохранить';
+                btn.onclick = saveAboutMe;
+            } else {
+                // Отключаем редактирование и сохраняем
+                saveAboutMe();
+            }
+        }
+        
+        // Привязываем функцию редактирования
+        document.getElementById('edit-about-btn').addEventListener('click', toggleAboutEdit);
 
-        // == УПРАВЛЕНИЕ ОШИБКАМИ АУТЕНТИФИКАЦИИ В UI ==
+
+        // ... (Функции УПРАВЛЕНИЯ ОШИБКАМИ АУТЕНТИФИКАЦИИ В UI, ОБРАБОТЧИКИ АУТЕНТИФИКАЦИИ, УПРАВЛЕНИЕ АУДИО - без изменений) ...
         function displayAuthError(message) {
             const errorElement = document.getElementById('auth-error-message');
             errorElement.textContent = message;
@@ -187,14 +265,10 @@
             errorElement.style.display = 'none';
         }
 
-
-        // == ОБРАБОТЧИКИ АУТЕНТИФИКАЦИИ (Login/Register) ==
-
         function getAuthData() {
             const emailInput = document.getElementById('auth-email');
             const passwordInput = document.getElementById('auth-password');
             const nickInput = document.getElementById('auth-nick');
-            // Используем фиктивный домен, так как Firebase Auth требует формата email
             const email = emailInput.value.trim().toLowerCase() + "@secretgram.co"; 
             const password = passwordInput.value.trim();
             const nick = nickInput.value.trim();
@@ -213,14 +287,12 @@
                 const user = userCredential.user;
                 
                 const profileRef = doc(db, `artifacts/${appId}/users/${user.uid}/profiles/myProfile`);
-                await setDoc(profileRef, { nick: nick, email: user.email, createdAt: serverTimestamp() });
+                await setDoc(profileRef, { nick: nick, email: user.email, createdAt: serverTimestamp(), about: 'Любые подробности, например: возраст, род занятий или город.' });
                 
                 userNick = nick;
                 console.log("Регистрация успешна!");
                 playNotificationSound(); 
             } catch (error) {
-                console.error("Ошибка регистрации:", error.message);
-                
                 let userMessage = "Ошибка регистрации.";
                 if (error.code === 'auth/operation-not-allowed') {
                     userMessage = "Ошибка: Аутентификация по Email/Паролю не включена в настройках вашего проекта Firebase. Пожалуйста, включите ее.";
@@ -244,8 +316,6 @@
                 console.log("Вход успешен!");
                 playNotificationSound(); 
             } catch (error) {
-                console.error("Ошибка входа:", error.message);
-                
                 let userMessage = "Ошибка входа. Проверьте имя пользователя и пароль.";
                  if (error.code === 'auth/operation-not-allowed') {
                     userMessage = "Ошибка: Аутентификация по Email/Паролю не включена в настройках вашего проекта Firebase. Пожалуйста, включите ее.";
@@ -258,13 +328,8 @@
             }
         }
 
-        // == УПРАВЛЕНИЕ АУДИО ==
-        
         const MESSAGE_SEND_DELAY = 1500; 
 
-        /**
-         * Генерирует простой звук (Бип) с помощью Web Audio API.
-         */
         function playNotificationSound() {
             try {
                 if (!audioContext) {
@@ -298,9 +363,19 @@
         }
         
         function loadChat(chatId) {
-            if (!currentUserId || !db) return;
+            // ... (логика загрузки сообщений из Firestore - без изменений) ...
+             if (!currentUserId || !db) return;
 
             const messagesContainer = document.getElementById('messages');
+            const chatHeader = document.getElementById('chat-active-name');
+            
+            if (chatId === 'general') {
+                chatHeader.textContent = 'Общий чат';
+            } else if (chatId === 'secret') {
+                chatHeader.textContent = 'Секретный чат';
+            } else {
+                 chatHeader.textContent = 'Личный чат'; // Здесь будет ник партнера
+            }
             
             if (chatListener) {
                 chatListener(); 
@@ -311,24 +386,20 @@
             
             const chatCollectionRef = getChatCollectionRef(chatId);
             
-            // Запрос без orderBy для максимальной отказоустойчивости
             const q = query(chatCollectionRef); 
             
             chatListener = onSnapshot(q, (snapshot) => {
                 
-                // Создаем итоговый массив из всех документов в снимке
                 const allMessages = snapshot.docs.map(doc => {
                     const data = doc.data();
                     return {
                         id: doc.id,
                         nick: data.nick,
                         text: data.text,
-                        // Используем serverTimestamp для сортировки, если он есть, иначе текущее время
                         timestamp: data.timestamp ? data.timestamp.toDate().getTime() : Date.now()
                     };
                 });
 
-                // Локальная сортировка для обеспечения правильного порядка
                 allMessages.sort((a, b) => a.timestamp - b.timestamp);
                 
                 messagesContainer.innerHTML = ''; 
@@ -336,7 +407,6 @@
                     displayMessage(msg.nick, msg.text, msg.timestamp);
                 });
                 
-                // Прокрутка вниз
                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 
             }, (error) => {
@@ -354,11 +424,9 @@
             loadChat(chatId);
         }
 
-        // == Функции Отправки Сообщения ==
-        
-
         async function sendMessage() {
-            if (!userNick || !currentUserId) {
+            // ... (логика отправки сообщения - без изменений) ...
+             if (!userNick || !currentUserId) {
                 console.error("Пользователь не авторизован.");
                 return;
             }
@@ -395,7 +463,6 @@
                     inputElement.focus();
                 } catch (error) {
                     console.error("Ошибка при отправке: ", error);
-                    console.log("Не удалось отправить сообщение.");
                     inputElement.disabled = false;
                     sendButton.disabled = false;
                     sendButton.innerHTML = '<i class="fas fa-paper-plane"></i>';
@@ -403,7 +470,7 @@
             }, MESSAGE_SEND_DELAY);
         }
 
-        // == ФУНКЦИИ УПРАВЛЕНИЯ UI ==
+        // == ФУНКЦИИ УПРАВЛЕНИЯ UI (без изменений) ==
         
         function formatTimestamp(timestamp) {
             if (!timestamp) return '';
@@ -470,7 +537,6 @@
             }
         }
 
-        // Переключение между формой входа и регистрации
         function toggleAuthMode() {
             clearAuthError();
             const isLogin = document.getElementById('auth-button').textContent === 'Войти';
@@ -483,9 +549,7 @@
 
         // == ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ==
         document.addEventListener('DOMContentLoaded', () => {
-            // Если инициализация Firebase не удалась в секции try/catch, выходим
             if (!auth || !db) {
-                // Если auth или db null, отображаем сообщение об ошибке
                  document.getElementById('loading-overlay').style.display = 'flex';
                  document.getElementById('loading-spinner').style.display = 'none';
                  document.getElementById('loading-text').textContent = "Ошибка: Firebase SDK не инициализирован. Проверьте вашу конфигурацию.";
@@ -498,18 +562,18 @@
             document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
             document.getElementById('logout-button').addEventListener('click', () => signOut(auth));
             
-            document.querySelectorAll('.chat-tab').forEach(tab => {
-                tab.addEventListener('click', () => switchChat(tab.dataset.chatId));
-            });
+            // Навигация по чатам
+            document.getElementById('tab-general').addEventListener('click', () => switchChat('general'));
+            document.getElementById('tab-secret').addEventListener('click', () => switchChat('secret'));
             
-            // Обработчики аутентификации
+            // Инициализация формы аутентификации
             document.getElementById('auth-nick-group').style.display = 'none'; 
             document.getElementById('auth-button').addEventListener('click', handleLogin);
             document.getElementById('toggle-auth-mode').addEventListener('click', toggleAuthMode);
             
             // Запускаем процесс аутентификации
-            setupAuthStateListener(); // Сначала устанавливаем слушатель изменений состояния
-            runAuthentication();      // Затем запускаем попытку аутентификации
+            setupAuthStateListener(); 
+            runAuthentication();      
         });
 
     </script>
@@ -537,6 +601,8 @@
             --auth-box-bg: #ffffff;
             --auth-button-gradient: linear-gradient(45deg, #007bff, #00c6ff);
             --color-error: #dc3545;
+            --bg-profile: #f8f9fa; /* Добавлено */
+            --border-profile: #e9ecef; /* Добавлено */
         }
 
         /* DARK THEME STYLES */
@@ -557,6 +623,8 @@
             --auth-box-bg: #1a1a1a;
             --auth-button-gradient: linear-gradient(45deg, #00b0ff, #5e00b3);
             --color-error: #ff6347;
+            --bg-profile: #2a2a2a; /* Добавлено */
+            --border-profile: #444444; /* Добавлено */
         }
 
 
@@ -581,7 +649,7 @@
             background-color: var(--bg-container);
             border-radius: 25px;
             box-shadow: var(--shadow-primary);
-            display: none; /* Скрыто по умолчанию, пока не авторизовано */
+            display: none; 
             flex-direction: column;
             overflow: hidden;
             position: relative;
@@ -595,7 +663,7 @@
         .header {
             background: linear-gradient(45deg, #8A2387, #E94057, #F27121);
             color: white;
-            padding: 20px 25px;
+            padding: 15px 25px;
             font-size: 1.6em;
             font-weight: bold;
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
@@ -609,19 +677,28 @@
             gap: 15px;
             align-items: center;
         }
-        .header .user-info {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 0.8em;
-            font-weight: normal;
-            padding: 5px 10px; 
-            border-radius: 15px;
+        
+        /* Кнопка настроек (Профиль) */
+        #settings-button {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 1.2em;
             cursor: pointer;
-            transition: background-color 0.2s;
+            transition: transform 0.2s;
+            outline: none;
         }
-        .header .user-info:hover {
-            background-color: rgba(255, 255, 255, 0.15);
+        #settings-button:hover { transform: scale(1.1); }
+        
+        /* Дополнительный заголовок для имени чата */
+        .chat-active-header {
+             padding: 10px 20px;
+             font-size: 1.1em;
+             font-weight: 600;
+             text-align: center;
+             background-color: var(--bg-container); 
+             border-bottom: 1px solid var(--border-input);
+             color: var(--color-text-primary);
         }
 
         /* Переключатель Темы */
@@ -813,13 +890,13 @@
             animation: spin 1s linear infinite;
         }
         
-        /* == Модальное окно Аутентификации == */
+        /* == Модальное окно Аутентификации (без изменений) == */
         #auth-prompt {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
             background-color: rgba(0, 0, 0, 0.85); 
             backdrop-filter: blur(8px); 
-            display: none; /* Скрыто по умолчанию */
+            display: none; 
             justify-content: center;
             align-items: center;
             z-index: 1000;
@@ -871,7 +948,6 @@
             outline: none;
         }
         
-        /* Стиль для сообщения об ошибке */
         #auth-error-message {
             display: none;
             background-color: rgba(220, 53, 69, 0.1);
@@ -913,7 +989,7 @@
             text-decoration: underline;
         }
 
-        /* Loading Overlay */
+        /* Loading Overlay (без изменений) */
         #loading-overlay {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
@@ -936,6 +1012,133 @@
             animation: spin 1s linear infinite;
             margin-bottom: 20px;
         }
+        
+        /* == Секция Профиля == */
+        #profile-overlay {
+            position: fixed;
+            top: 0; right: 0;
+            width: 480px; 
+            height: 100vh;
+            background-color: var(--bg-container); 
+            display: none; 
+            flex-direction: column;
+            box-shadow: var(--shadow-primary);
+            z-index: 999;
+            transition: transform 0.3s ease-out;
+        }
+        .profile-header {
+            background: linear-gradient(45deg, #8A2387, #E94057, #F27121);
+            color: white;
+            padding: 15px 25px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .profile-header button {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 1.5em;
+            cursor: pointer;
+        }
+        
+        .profile-content {
+            padding: 20px 25px;
+            overflow-y: auto;
+            flex-grow: 1;
+        }
+        .profile-avatar-area {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .profile-main-avatar {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #1de9b6, #00b0ff);
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 3em;
+            font-weight: bold;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            position: relative;
+        }
+        .profile-name {
+            font-size: 1.8em;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        .profile-status {
+            font-size: 0.9em;
+            color: var(--color-text-secondary);
+        }
+
+        .profile-section {
+            background-color: var(--bg-profile);
+            border: 1px solid var(--border-profile);
+            border-radius: 15px;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+        .profile-section-title {
+            font-size: 0.9em;
+            color: var(--color-text-secondary);
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+        .profile-info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-profile);
+        }
+        .profile-info-row:last-child { border-bottom: none; }
+
+        .profile-info-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 500;
+        }
+        .profile-info-value {
+            font-weight: bold;
+            color: var(--color-text-primary);
+        }
+        
+        .about-me-text {
+            white-space: pre-wrap;
+        }
+        .about-me-edit-area {
+            display: none; /* Скрыто по умолчанию */
+        }
+        .about-me-edit-area textarea {
+            width: 100%;
+            height: 100px;
+            padding: 10px;
+            border: 1px solid var(--border-input);
+            border-radius: 8px;
+            resize: none;
+            box-sizing: border-box;
+            background-color: var(--bg-input);
+            color: var(--color-text-primary);
+        }
+        #edit-about-btn {
+            background: var(--auth-button-gradient);
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.9em;
+            margin-top: 10px;
+            display: block;
+            width: 100%;
+        }
 
 
         /* Адаптивный дизайн */
@@ -945,6 +1148,7 @@
             .header { padding: 15px 20px; }
             .input-area { padding: 10px 15px; }
             .auth-box { width: 90%; margin: 20px; padding: 30px; }
+            #profile-overlay { width: 100%; }
         }
     </style>
 </head>
@@ -982,6 +1186,53 @@
     </div>
 </div>
 
+<div id="profile-overlay">
+    <div class="profile-header">
+        <button id="close-profile-btn"><i class="fas fa-arrow-left"></i></button>
+        <div style="font-size: 1.2em;">Информация</div>
+        <button style="visibility: hidden;"><i class="fas fa-times"></i></button>
+    </div>
+    
+    <div class="profile-content">
+        <div class="profile-avatar-area">
+            <div class="profile-main-avatar" id="profile-avatar-initial">?</div>
+            <div class="profile-name" id="profile-nick">Гость</div>
+            <div class="profile-status">был(а) 4 часа назад (имитация)</div>
+        </div>
+        
+        <div class="profile-section">
+            <div class="profile-section-title">О себе</div>
+            <div id="profile-about-text" class="about-me-text">
+                Любые подробности, например: возраст, род занятий или город.
+            </div>
+            <div id="profile-about-edit" class="about-me-edit-area">
+                <textarea id="profile-about-input" maxlength="200"></textarea>
+            </div>
+            <button id="edit-about-btn"><i class="fas fa-edit"></i> Изменить</button>
+        </div>
+        
+        <div class="profile-section">
+            <div class="profile-info-row">
+                <div class="profile-info-label"><i class="fas fa-user"></i> Ник</div>
+                <div class="profile-info-value" id="profile-nick-info"></div>
+            </div>
+            <div class="profile-info-row">
+                <div class="profile-info-label"><i class="fas fa-at"></i> Пользователь</div>
+                <div class="profile-info-value" id="profile-id">@user_id_0000</div>
+            </div>
+             <div class="profile-info-row" style="color: var(--color-text-secondary);">
+                <div class="profile-info-label"><i class="fas fa-phone-alt"></i> Номер телефона</div>
+                <div class="profile-info-value">+370 664 14501 (нет в демо)</div>
+            </div>
+        </div>
+
+        <div class="profile-section" style="text-align: center;">
+            <button id="logout-button" style="background: var(--color-error); color: white; border: none; padding: 10px 20px; border-radius: 10px; cursor: pointer; font-weight: bold;"><i class="fas fa-sign-out-alt"></i> Выйти из SecretGram</button>
+        </div>
+    </div>
+</div>
+
+
 <div class="chat-container">
     <div class="header">
         <div class="app-name">SecretGram</div>
@@ -990,8 +1241,8 @@
                 <i class="fas fa-moon"></i>
                 <i class="fas fa-sun"></i>
             </button>
-            <button id="logout-button" title="Выйти">
-                <i class="fas fa-sign-out-alt"></i>
+            <button id="settings-button" title="Профиль и Настройки">
+                <i class="fas fa-cog"></i> 
             </button>
         </div>
     </div>
@@ -1003,16 +1254,15 @@
         <div class="chat-tab" data-chat-id="secret" id="tab-secret">
             <i class="fas fa-lock"></i> Секретный
         </div>
-    </div>
+        </div>
+    
+    <div class="chat-active-header" id="chat-active-name">Общий чат</div>
 
     <div id="messages">
         </div>
     <div class="input-area">
         <input type="text" id="message-input" placeholder="Написать сообщение..." required>
         <button id="send-button"><i class="fas fa-paper-plane"></i></button>
-    </div>
-    <div class="header" style="padding: 10px 20px; font-size: 0.8em; font-weight: normal; background: var(--bg-input-container); color: var(--color-text-secondary); border-top: 1px solid var(--border-input);">
-        <span id="current-nick">Гость</span> | ID: <span id="current-user-id"></span>
     </div>
 </div>
 
