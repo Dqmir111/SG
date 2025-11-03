@@ -7,7 +7,6 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     
-    <!-- НОВЫЙ БЛОК: Правила безопасности Firebase Firestore -->
     <script type="text/security-rules">
     rules_version = '2';
     service cloud.firestore {
@@ -34,8 +33,6 @@
       }
     }
     </script>
-    <!-- КОНЕЦ НОВОГО БЛОКА -->
-    
     <style>
         /* Глобальные стили */
         body {
@@ -314,10 +311,9 @@
         }
 
         /**
-         * Выполняет вход или регистрацию с обходом ошибки Firebase Console.
+         * Выполняет вход или регистрацию. НЕ ИСПОЛЬЗУЕТ АНОНИМНЫЙ ОБХОД.
          */
         async function handleAuthAction() {
-            // КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Используем .trim() для очистки от невидимых пробелов
             const email = authEmailInput.value.trim();
             const password = authPasswordInput.value.trim();
             
@@ -340,25 +336,13 @@
                 }
             } catch (error) {
                 console.error("Auth error:", error);
-                let errorMessage = 'Неизвестная ошибка.';
+                let errorMessage = 'Неизвестная ошибка. Пожалуйста, проверьте консоль.';
                 
                 if (error.code === 'auth/operation-not-allowed') {
-                    // *** ИСПРАВЛЕНИЕ: Улучшенное сообщение и автоматический обход ***
-                    authErrorDisplay.textContent = 'Провайдер Email/Password отключен. Выполняю автоматический вход...'; 
-                    
-                    // АНОНИМНЫЙ ОБХОДНОЙ ПУТЬ: Позволяет пользователю начать работу немедленно
-                    try {
-                        await signInAnonymously(auth);
-                        // Если анонимный вход успешен, onAuthStateChanged обработает переход на следующий экран.
-                        // Успех -> return, чтобы избежать finally и обновления кнопок
-                        return; 
-                    } catch (e) {
-                        errorMessage = "Ошибка: Провайдер Email/Password отключен. Не удалось выполнить анонимный вход.";
-                    }
-
+                    // *** КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Только сообщение об ошибке, без автоматического входа ***
+                    errorMessage = 'ПРОВАЙДЕР Email/Password отключен. Включите его в консоли Firebase (Authentication -> Sign-in method).'; 
                 } else if (error.code === 'auth/invalid-email') {
-                    // Улучшенное сообщение, явно указывающее на пробелы или формат
-                    errorMessage = 'Некорректный формат email адреса (отсутствует "@" или есть пробелы). Пожалуйста, проверьте ввод.';
+                    errorMessage = 'Некорректный формат email адреса.';
                 } else if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
                     errorMessage = 'Неверный email или пароль.';
                 } else if (error.code === 'auth/email-already-in-use') {
@@ -367,14 +351,12 @@
                     errorMessage = 'Слишком слабый пароль.';
                 }
 
-                // Показываем ошибку только если обходной путь не сработал
-                authErrorDisplay.textContent = errorMessage.startsWith('Ошибка:') ? errorMessage : `Ошибка: ${errorMessage}`;
-            } finally {
-                // Восстанавливаем кнопку, только если не произошел успешный вход/обход
-                if (!auth.currentUser) {
-                    authActionBtn.disabled = false;
-                    authActionBtn.textContent = isLoginMode ? 'Войти' : 'Зарегистрироваться';
-                }
+                // Показываем ошибку
+                authErrorDisplay.textContent = `Ошибка: ${errorMessage}`;
+
+                // Восстанавливаем кнопку
+                authActionBtn.disabled = false;
+                authActionBtn.textContent = isLoginMode ? 'Войти' : 'Зарегистрироваться';
             }
         }
         
@@ -413,14 +395,16 @@
 
                 // --- Обязательный шаг для среды Canvas (начальный вход/выход) ---
                 try {
-                    // 1. Попытка начальной аутентификации
+                    // 1. Попытка начальной аутентификации с токеном
                     if (initialAuthToken) {
                         await signInWithCustomToken(auth, initialAuthToken);
                     } else {
-                        await signInAnonymously(auth);
+                        // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Не используем signInAnonymously() здесь
+                        // Но если пользователь уже был анонимно зарегистрирован в прошлой сессии,
+                        // onAuthStateChanged ниже его подхватит.
                     }
                     
-                    // 2. Принудительный выход для отображения экрана входа/регистрации
+                    // 2. Принудительный выход для отображения экрана входа/регистрации (если пользователь вошел по токену)
                     if (auth.currentUser) {
                         await signOut(auth);
                     }
@@ -483,7 +467,7 @@
                         const emailPrefix = auth.currentUser.email.split('@')[0].replace(/[^a-z0-9]/gi, '');
                         defaultNickname = `${emailPrefix}_${uid.substring(0, 4)}`;
                     } else {
-                        // Для анонимного входа
+                        // Для анонимного входа (если он каким-то образом произошел)
                         defaultNickname = `Anon_${uid.substring(0, 4)}`;
                     }
 
@@ -874,10 +858,8 @@
 </head>
 <body>
 
-    <!-- Модальное окно профиля -->
     <div id="profile-modal" class="fixed inset-0 bg-black bg-opacity-70 z-50 flex justify-center items-center p-4 hidden">
         <div class="profile-modal-content rounded-xl shadow-2xl">
-            <!-- Заголовок -->
             <div class="profile-header-bg"></div>
             <div class="relative z-10 p-5 pt-8 flex flex-col items-center">
                 <div class="w-24 h-24 flex items-center justify-center rounded-full bg-purple-600 text-4xl font-bold text-white border-4 border-[#161b22] mb-3 shadow-lg">
@@ -888,7 +870,6 @@
                 </h2>
             </div>
 
-            <!-- Раздел редактирования никнейма -->
             <div class="profile-section relative">
                 <h3 class="text-lg font-semibold mb-3">Настройки профиля</h3>
                 <div class="flex flex-col space-y-3">
@@ -914,13 +895,11 @@
         </div>
     </div>
 
-    <!-- 0. Экран загрузки -->
     <div id="loading-screen" class="absolute inset-0 bg-black flex flex-col justify-center items-center z-50">
         <div class="loader"></div>
         <p class="mt-4 text-white">Подключение...</p>
     </div>
 
-    <!-- 1. Экран аутентификации (Новый) -->
     <div id="auth-screen" class="p-8 hidden">
         <h1 id="auth-title" class="text-3xl font-bold text-white mb-6 text-center">Вход в SecretGram</h1>
         
@@ -950,12 +929,9 @@
     </div>
 
 
-    <!-- 2. Основное приложение мессенджера -->
     <div id="messenger-app" class="app-container hidden">
 
-        <!-- Список чатов -->
         <div id="chats-list-view" class="w-full h-full flex flex-col bg-[#161b22]">
-            <!-- Header (Список чатов) -->
             <div class="p-4 bg-[#161b22] border-b border-[#21262d] flex justify-between items-center flex-shrink-0 z-10">
                 <h1 class="text-2xl font-bold text-white">Чаты</h1>
                 <button id="open-profile-btn" class="flex items-center space-x-2 p-2 bg-[#21262d] hover:bg-[#30363d] rounded-full transition duration-150 ease-in-out">
@@ -964,21 +940,16 @@
                 </button>
             </div>
 
-            <!-- Поиск -->
             <div class="p-4 flex-shrink-0">
                 <input type="text" id="search-input" placeholder="Найти пользователя по никнейму..."
                        class="w-full px-4 py-2 rounded-full bg-[#0d1117] border border-[#21262d] focus:border-[#ff4081] focus:ring-1 focus:ring-[#ff4081] focus:ring-opacity-50 text-white placeholder-gray-500">
             </div>
 
-            <!-- Результаты поиска -->
             <div id="search-results" class="px-4 pb-4">
-                <!-- Сюда будут добавляться результаты поиска -->
-            </div>
+                </div>
 
-            <!-- Список чатов -->
             <div id="chats-list-view-content" class="flex-grow overflow-y-auto px-4 space-y-2 pb-4">
-                <!-- Сюда будет добавлен "Общий чат" -->
-            </div>
+                </div>
             
             <div class="p-2 border-t border-[#21262d] text-center text-xs text-[#8b949e] flex-shrink-0">
                 <span id="current-user-id" class="block truncate">ID: ...</span>
@@ -986,10 +957,8 @@
             </div>
         </div>
 
-        <!-- Окно чата -->
         <div id="chat-view" class="w-full h-full flex-col bg-[#161b22] md:flex chat-placeholder" style="display: none;">
             
-            <!-- Header (Окно чата) -->
             <div class="p-4 bg-[#161b22] border-b border-[#21262d] flex items-center flex-shrink-0">
                 <button id="back-to-chats" class="md:hidden mr-3 p-1 rounded-full hover:bg-[#21262d] text-white">
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"></path><path d="M12 19l-7-7 7-7"></path></svg>
@@ -1000,12 +969,10 @@
                 <h2 id="chat-header-title" class="text-xl font-bold text-white truncate">Общий чат</h2>
             </div>
 
-            <!-- Область сообщений -->
             <div id="chat-messages" class="chat-messages">
                 <div class="text-center text-[#8b949e]">Выберите чат, чтобы начать общение.</div>
             </div>
 
-            <!-- Ввод сообщения -->
             <div id="chat-input-area" class="chat-input-container flex-shrink-0">
                 <textarea id="message-input" rows="1"
                        class="flex-grow resize-none overflow-y-auto px-4 py-2 rounded-xl bg-[#0d1117] border border-[#21262d] focus:border-[#ff4081] focus:ring focus:ring-[#ff4081] focus:ring-opacity-50 text-white placeholder-gray-500 mr-3"
