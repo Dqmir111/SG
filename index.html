@@ -442,17 +442,24 @@
 
                 // 1. СНАЧАЛА Загружаем профиль
                 db.collection('users').doc(user.uid).onSnapshot((doc) => {
-                    currentUser = { uid: user.uid, ...doc.data() };
+                    // Проверяем, есть ли данные
+                    if (doc.exists) {
+                        currentUser = { uid: user.uid, ...doc.data() };
                     
-                    // Обновляем UI профиля
-                    usernameInput.value = currentUser.username;
-                    colorInput.value = currentUser.avatarColor;
-                    userAvatar.style.backgroundColor = currentUser.avatarColor;
-                    
-                    // 2. И ТОЛЬКО ПОТОМ (когда currentUser ЕСТЬ) загружаем списки
-                    //    Это ИСПРАВЛЕНИЕ "белого экрана" / ошибки `uid of null`
-                    loadAllUsers();
-                    loadUserChats();
+                        // Обновляем UI профиля
+                        usernameInput.value = currentUser.username;
+                        colorInput.value = currentUser.avatarColor;
+                        userAvatar.style.backgroundColor = currentUser.avatarColor;
+                        
+                        // 2. И ТОЛЬКО ПОТОМ (когда currentUser ЕСТЬ) загружаем списки
+                        //    Это ИСПРАВЛЕНИЕ "белого экрана" / ошибки `uid of null`
+                        loadAllUsers();
+                        loadUserChats();
+                    } else {
+                        // Это может случиться, если пользователь удален в DB, но не в Auth
+                        console.error("Пользователь есть в Auth, но нет в Firestore!");
+                        auth.signOut(); // Выходим, чтобы избежать ошибок
+                    }
                 });
                 
             } else {
@@ -485,6 +492,7 @@
 
         // Загрузка ВСЕХ пользователей
         function loadAllUsers() {
+             if (!currentUser) return; // Доп. проверка
             db.collection('users').onSnapshot((snapshot) => {
                 userListEl.innerHTML = '';
                 snapshot.forEach((doc) => {
@@ -505,6 +513,7 @@
 
         // Загрузка АКТИВНЫХ чатов
         function loadUserChats() {
+             if (!currentUser) return; // Доп. проверка
             db.collection('chats')
                 .where('members', 'array-contains', currentUser.uid)
                 .orderBy('lastUpdated', 'desc')
@@ -514,8 +523,9 @@
                         const chat = { id: doc.id, ...doc.data() };
                         
                         const otherUserId = chat.members.find(uid => uid !== currentUser.uid);
-                        const otherUsername = chat.memberUsernames[otherUserId] || 'Неизвестно';
-                        const otherAvatar = chat.memberAvatars[otherUserId] || '#ccc';
+                        // Проверки на случай, если данные еще не полные
+                        const otherUsername = chat.memberUsernames ? chat.memberUsernames[otherUserId] : 'Загрузка...';
+                        const otherAvatar = chat.memberAvatars ? chat.memberAvatars[otherUserId] : '#ccc';
 
                         const el = createListItem(
                             chat.id,
